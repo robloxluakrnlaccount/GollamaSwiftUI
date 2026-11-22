@@ -125,7 +125,9 @@ struct SendButton: View {
                 .font(.system(size: size * 0.42, weight: .bold))
                 .foregroundStyle(.white)
                 .frame(width: size, height: size)
-                .glassEffect(.regular.tint(enabled ? Pal.blue : Color.gray.opacity(0.45)).interactive(), in: .circle)
+                .background(enabled ? Pal.blue : Color.gray.opacity(0.45), in: .circle)
+                .overlay(Circle().strokeBorder(.white.opacity(0.22), lineWidth: 0.5))
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
@@ -1844,7 +1846,7 @@ struct OverviewCard: View {
                 .padding(.leading, 16)
                 .padding(.trailing, 7)
                 .frame(height: 44)
-                .glassEffect(.regular.interactive(), in: .capsule)
+                .glassEffect(.regular, in: .capsule)
                 .padding(.top, 4)
             }
         }
@@ -1981,40 +1983,125 @@ struct NewsTab: View {
 struct AIModeRoot: View {
     @Environment(AppModel.self) private var app
     @Environment(\.horizontalSizeClass) private var hSize
-    @State private var showHistory = false
+    @State private var sidebarOpen = false
+    @State private var dragX: CGFloat = 0
+    @State private var draggingSidebar: Bool? = nil
 
     var body: some View {
-        NavigationStack {
-            HStack(spacing: 0) {
-                if hSize == .regular {
-                    HistoryList().frame(width: 300)
-                    Divider()
+        Group {
+            if hSize == .regular {
+                NavigationStack {
+                    HStack(spacing: 0) {
+                        HistoryList().frame(width: 300)
+                        Divider()
+                        ChatView()
+                    }
+                    .navigationTitle(app.chatTitle)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar { trailingToolbar }
                 }
-                ChatView()
-            }
-            .navigationTitle(app.chatTitle)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    if hSize != .regular {
-                        Button { showHistory = true } label: { Image(systemName: "clock.arrow.circlepath") }
+            } else {
+                GeometryReader { geo in
+                    let sidebarW = min(geo.size.width * 0.82, 320)
+                    let baseOffset: CGFloat = sidebarOpen ? sidebarW : 0
+                    let offset = min(sidebarW, max(0, baseOffset + dragX))
+                    let progress = sidebarW > 0 ? offset / sidebarW : 0
+
+                    ZStack(alignment: .leading) {
+                        HistoryList(onPick: { setSidebar(false) })
+                            .frame(width: sidebarW)
+                            .frame(maxHeight: .infinity)
+                            .background(.ultraThinMaterial)
+                            .overlay(alignment: .trailing) { Divider() }
+                            .offset(x: offset - sidebarW)
+                            .allowsHitTesting(offset > 0)
+
+                        NavigationStack {
+                            ChatView()
+                                .navigationTitle(app.chatTitle)
+                                .navigationBarTitleDisplayMode(.inline)
+                                .toolbar {
+                                    ToolbarItem(placement: .topBarLeading) {
+                                        Button {
+                                            dismissKeyboard()
+                                            setSidebar(!sidebarOpen)
+                                        } label: {
+                                            Image(systemName: "sidebar.left")
+                                        }
+                                    }
+                                    trailingToolbar
+                                }
+                        }
+                        .offset(x: offset)
+                        .overlay {
+                            if offset > 0 {
+                                Color.black.opacity(0.28 * progress)
+                                    .ignoresSafeArea()
+                                    .offset(x: offset)
+                                    .onTapGesture { setSidebar(false) }
+                            }
+                        }
+                    }
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 20, coordinateSpace: .global)
+                            .onChanged { v in
+                                if draggingSidebar == nil {
+                                    let dx = v.translation.width
+                                    let dy = v.translation.height
+                                    if abs(dx) > 14 && abs(dx) > abs(dy) * 1.4 {
+                                        if (!sidebarOpen && dx > 0) || (sidebarOpen && dx < 0) {
+                                            draggingSidebar = true
+                                            dismissKeyboard()
+                                        } else {
+                                            draggingSidebar = false
+                                        }
+                                    } else if abs(dy) > 14 {
+                                        draggingSidebar = false
+                                    }
+                                }
+                                if draggingSidebar == true {
+                                    dragX = v.translation.width
+                                }
+                            }
+                            .onEnded { v in
+                                defer {
+                                    draggingSidebar = nil
+                                    dragX = 0
+                                }
+                                guard draggingSidebar == true else { return }
+                                let predicted = (sidebarOpen ? sidebarW : 0) + v.predictedEndTranslation.width
+                                setSidebar(predicted > sidebarW * 0.45)
+                            }
+                    )
+                    .onChange(of: sidebarOpen) { _, open in
+                        if open { Task { await app.loadChats() } }
                     }
                 }
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button { app.newChat() } label: { Image(systemName: "square.and.pencil") }
-                    Menu {
-                        if let a = app.address { Text(a.display) }
-                        if !app.modelName.isEmpty { Text("Model: \(app.modelName)") }
-                        Button("Disconnect", systemImage: "wifi.slash", role: .destructive) { app.disconnect() }
-                    } label: { Image(systemName: "ellipsis") }
-                }
-            }
-            .sheet(isPresented: $showHistory) {
-                HistoryList(onPick: { showHistory = false })
-                    .presentationDetents([.medium, .large])
             }
         }
         .background(AmbientBackground())
+    }
+
+    @ToolbarContentBuilder
+    private var trailingToolbar: some ToolbarContent {
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            Button { app.newChat() } label: { Image(systemName: "square.and.pencil") }
+            Menu {
+                if let a = app.address { Text(a.display) }
+                if !app.modelName.isEmpty { Text("Model: \(app.modelName)") }
+                Button("Disconnect", systemImage: "wifi.slash", role: .destructive) { app.disconnect() }
+            } label: { Image(systemName: "ellipsis") }
+        }
+    }
+
+    private func setSidebar(_ open: Bool) {
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.88)) {
+            sidebarOpen = open
+        }
+    }
+
+    private func dismissKeyboard() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 }
 
