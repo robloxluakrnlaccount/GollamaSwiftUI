@@ -1,0 +1,42 @@
+name: Build unsigned iOS IPA
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Archive unsigned app
+        run: |
+          xcodebuild archive \
+            -project Gollama.xcodeproj \
+            -scheme Gollama \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/Gollama.xcarchive \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Gollama.xcarchive/Products/Applications/Gollama.app Payload/Gollama.app
+          zip -r Gollama.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gollama
+          path: Gollama.ipa
+          if-no-files-found: error

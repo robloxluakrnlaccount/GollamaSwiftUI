@@ -1,0 +1,16 @@
+name: Gollama
+options:
+  deploymentTarget:
+    iOS: "26.0"
+targets:
+  Gollama:
+    type: application
+    platform: iOS
+    sources:
+      - path: Gollama.swift
+    info:
+      path: Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.Gollama
+        CODE_SIGNING_ALLOWED: NO
