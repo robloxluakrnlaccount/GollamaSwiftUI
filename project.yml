@@ -10,6 +10,8 @@ targets:
       - path: Gollama.swift
     info:
       path: Info.plist
+      properties:
+        UILaunchScreen: {}
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.Gollama
