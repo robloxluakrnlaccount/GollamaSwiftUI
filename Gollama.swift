@@ -194,19 +194,26 @@ struct NewsItem: Identifiable, Hashable {
 }
 
 @Observable final class Overview {
-    var status = "", text = "", think = "", error: String?
+    var status = ""
+    var text = ""
+    var think = ""
+    var error: String?
     var steps: [String] = []
     var sources: [Hit] = []
-    var done = false, expanded = false
+    var done = false
+    var expanded = false
 }
 
 @Observable final class ModeTurn: Identifiable {
     let id: Int
     let text: String
-    var answer = "", status = "", think = ""
+    var answer = ""
+    var status = ""
+    var think = ""
     var steps: [String] = []
     var sources: [Hit] = []
-    var done = false, error: String?
+    var done = false
+    var error: String?
     var noResultsFor: String?
     init(id: Int, text: String) { self.id = id; self.text = text }
 }
@@ -233,12 +240,16 @@ enum SearchTab: String, CaseIterable, Identifiable {
     var started = false          // false = home screen
     var searching = false
     var results: [Hit] = []
-    var corrected: String?, original = ""
+    var corrected: String?
+    var original = ""
     var searchError: String?
     var overview = Overview()
-    var images: [ImageItem] = [], news: [NewsItem] = []
-    var loadingImages = false, loadingNews = false
-    var imagesError: String?, newsError: String?
+    var images: [ImageItem] = []
+    var news: [NewsItem] = []
+    var loadingImages = false
+    var loadingNews = false
+    var imagesError: String?
+    var newsError: String?
     var turns: [ModeTurn] = []
     var seedHistory: [[String: String]] = []
 
