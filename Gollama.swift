@@ -2128,7 +2128,7 @@ struct HTMLPreviewView: UIViewRepresentable {
         }
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    @MainActor final class Coordinator: NSObject, WKNavigationDelegate {
         var lastHTML = ""
         @Binding var height: CGFloat
         var onLink: (URL) -> Void
