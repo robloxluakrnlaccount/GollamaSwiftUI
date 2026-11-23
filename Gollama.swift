@@ -188,6 +188,96 @@ struct VideoPlayerSheet: View {
     }
 }
 
+struct MathWebView: UIViewRepresentable {
+    let tex: String
+    @Binding var height: CGFloat
+
+    func makeCoordinator() -> Coordinator { Coordinator(height: $height) }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let cfg = WKWebViewConfiguration()
+        let wv = WKWebView(frame: .zero, configuration: cfg)
+        wv.navigationDelegate = context.coordinator
+        wv.isOpaque = false
+        wv.backgroundColor = .clear
+        wv.scrollView.backgroundColor = .clear
+        wv.scrollView.isScrollEnabled = true
+        wv.scrollView.showsVerticalScrollIndicator = false
+        return wv
+    }
+
+    func updateUIView(_ wv: WKWebView, context: Context) {
+        guard context.coordinator.lastTex != tex else { return }
+        context.coordinator.lastTex = tex
+        let escaped = tex
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "`", with: "\\`")
+            .replacingOccurrences(of: "$", with: "\\$")
+        let fallback = LatexFormatter.format(tex)
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+        let html = """
+        <!doctype html>
+        <html>
+        <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+        <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+        <style>
+          html, body { margin: 0; padding: 0; background: transparent; color: #111; font-family: -apple-system, serif; }
+          @media (prefers-color-scheme: dark) { html, body { color: #f5f5f7; } }
+          #math { padding: 10px 14px; display: flex; justify-content: center; align-items: center; min-height: 32px; overflow-x: auto; font-size: 17px; }
+          .katex-display { margin: 0 !important; }
+        </style>
+        </head>
+        <body>
+        <div id="math">\(fallback)</div>
+        <script>
+          (function() {
+            var el = document.getElementById('math');
+            if (window.katex) {
+              try {
+                katex.render(`\(escaped)`, el, { displayMode: true, throwOnError: false });
+              } catch (e) {}
+            }
+          })();
+        </script>
+        </body>
+        </html>
+        """
+        wv.loadHTMLString(html, baseURL: nil)
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var lastTex = ""
+        @Binding var height: CGFloat
+        init(height: Binding<CGFloat>) { _height = height }
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            Task { @MainActor in
+                if let res = try? await webView.evaluateJavaScript("document.getElementById('math').scrollHeight"),
+                   let num = res as? NSNumber {
+                    let h = CGFloat(num.doubleValue)
+                    if h > 16 {
+                        self.height = min(max(h + 4, 48), 260)
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct MathBlockView: View {
+    let tex: String
+    @State private var height: CGFloat = 56
+    var body: some View {
+        MathWebView(tex: tex, height: $height)
+            .frame(height: height)
+            .frame(maxWidth: .infinity)
+            .glassEffect(.regular, in: .rect(cornerRadius: 14))
+    }
+}
+
 struct HTMLPreviewView: UIViewRepresentable {
     let html: String
     @Binding var height: CGFloat
@@ -1745,16 +1835,7 @@ struct MarkdownView: View {
             case .code(let lang):
                 CodeBlockView(lang: lang, raw: b.raw)
             case .math(let tex):
-                ScrollView(.horizontal, showsIndicators: false) {
-                    Text(LatexFormatter.format(tex))
-                        .font(.system(.body, design: .serif))
-                        .italic()
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .textSelection(.enabled)
-                }
-                .frame(maxWidth: .infinity, alignment: .center)
-                .glassEffect(.regular, in: .rect(cornerRadius: 14))
+                MathBlockView(tex: tex)
             case .divider:
                 Divider().padding(.vertical, 4)
             case .heading(let level):
@@ -2712,14 +2793,10 @@ struct AIModeRoot: View {
                                     trailingToolbar
                                 }
                         }
-                        .background(AmbientBackground())
-                        .clipShape(RoundedRectangle(cornerRadius: 46 * progress, style: .continuous))
-                        .shadow(color: .black.opacity(0.25 * progress), radius: 20, x: -6, y: 0)
                         .offset(x: offset)
                         .overlay {
                             if offset > 0 {
                                 Color.black.opacity(0.28 * progress)
-                                    .clipShape(RoundedRectangle(cornerRadius: 46 * progress, style: .continuous))
                                     .ignoresSafeArea()
                                     .offset(x: offset)
                                     .onTapGesture { setSidebar(false) }
@@ -2727,20 +2804,21 @@ struct AIModeRoot: View {
                         }
                     }
                     .simultaneousGesture(
-                        DragGesture(minimumDistance: 20, coordinateSpace: .global)
+                        DragGesture(minimumDistance: 24, coordinateSpace: .global)
                             .onChanged { v in
                                 if draggingSidebar == nil {
                                     let dx = v.translation.width
                                     let dy = v.translation.height
-                                    if abs(dx) > 14 && abs(dx) > abs(dy) * 1.4 {
-                                        if (!sidebarOpen && dx > 0) || (sidebarOpen && dx < 0) {
+                                    if abs(dy) > 10 && abs(dy) >= abs(dx) * 0.6 {
+                                        draggingSidebar = false
+                                    } else if abs(dx) > 24 && abs(dx) > abs(dy) * 2.2 {
+                                        let fromLeftEdge = v.startLocation.x < 44
+                                        if (!sidebarOpen && fromLeftEdge && dx > 0) || (sidebarOpen && dx < 0) {
                                             draggingSidebar = true
                                             dismissKeyboard()
                                         } else {
                                             draggingSidebar = false
                                         }
-                                    } else if abs(dy) > 14 {
-                                        draggingSidebar = false
                                     }
                                 }
                                 if draggingSidebar == true {
