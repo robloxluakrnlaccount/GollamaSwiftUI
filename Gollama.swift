@@ -275,6 +275,7 @@ struct MathBlockView: View {
             .frame(height: height)
             .frame(maxWidth: .infinity)
             .glassEffect(.regular, in: .rect(cornerRadius: 14))
+            .clipped()
     }
 }
 
@@ -1782,7 +1783,9 @@ struct CodeBlockView: View {
             }
         }
         .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .glassEffect(.regular, in: .rect(cornerRadius: 14))
+        .clipped()
         .sheet(isPresented: $fullScreen) {
             NavigationStack {
                 HTMLPreviewView(html: raw, height: .constant(600))
@@ -2939,37 +2942,42 @@ struct ChatView: View {
     @State private var userScrolled = false
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    if app.turns.isEmpty { EmptyChat() }
-                    ForEach(app.turns) { t in TurnView(turn: t).id(t.id) }
-                    Color.clear.frame(height: 8).id("end")
+        GeometryReader { geo in
+            let colW = min(geo.size.width, 760)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 22) {
+                        if app.turns.isEmpty { EmptyChat() }
+                        ForEach(app.turns) { t in TurnView(turn: t).id(t.id) }
+                        Color.clear.frame(height: 8).id("end")
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .frame(width: colW, alignment: .leading)
+                    .frame(maxWidth: .infinity)
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-                .readableWidth(760)
-            }
-            .scrollDismissesKeyboard(.interactively)
-            .simultaneousGesture(DragGesture().onChanged { _ in userScrolled = true })
-            .onChange(of: app.turns.count) { _, _ in
-                userScrolled = false
-                withAnimation { proxy.scrollTo("end", anchor: .bottom) }
-            }
-            .onChange(of: app.chatId) { _, _ in
-                userScrolled = false
-                proxy.scrollTo("end", anchor: .bottom)
-            }
-            .onChange(of: app.turns.last?.done) { _, done in
-                if done == true && !userScrolled {
+                .scrollDismissesKeyboard(.interactively)
+                .simultaneousGesture(DragGesture().onChanged { _ in userScrolled = true })
+                .onChange(of: app.turns.count) { _, _ in
+                    userScrolled = false
                     withAnimation { proxy.scrollTo("end", anchor: .bottom) }
                 }
-            }
-            .safeAreaInset(edge: .bottom) {
-                ChatInputBar()
-                    .readableWidth(760)
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 4)
+                .onChange(of: app.chatId) { _, _ in
+                    userScrolled = false
+                    proxy.scrollTo("end", anchor: .bottom)
+                }
+                .onChange(of: app.turns.last?.done) { _, done in
+                    if done == true && !userScrolled {
+                        withAnimation { proxy.scrollTo("end", anchor: .bottom) }
+                    }
+                }
+                .safeAreaInset(edge: .bottom) {
+                    ChatInputBar()
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 4)
+                        .frame(width: colW)
+                        .frame(maxWidth: .infinity)
+                }
             }
         }
     }
