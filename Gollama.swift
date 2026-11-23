@@ -2124,7 +2124,7 @@ struct HTMLPreviewView: UIViewRepresentable {
                 <!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>body{font-family:-apple-system,sans-serif;margin:12px;color:#111;background:#fff;}@media(prefers-color-scheme:dark){body{color:#f5f5f5;background:#1c1c1e;}}</style></head><body>\(html)</body></html>
                 """
             }
-            wv.loadHTMLString(wrapped, baseURL: nil)
+            wv.loadHTMLString(wrapped, baseURL: URL(string: "https://localhost"))
         }
     }
 
@@ -2210,7 +2210,7 @@ struct LiveHTMLBlock: View {
     }
 }
 
-/// Ordinary code. HTML / SVG blocks also get a Run button.
+/// Ordinary code. HTML / SVG / JavaScript blocks can run directly inside the chat.
 struct CodeBlock: View {
     let lang: String
     let code: String
@@ -2220,7 +2220,31 @@ struct CodeBlock: View {
     @State private var preview = false
     @State private var h: CGFloat = 220
 
-    private var canRun: Bool { !open && ["html", "svg"].contains(lang.lowercased()) }
+    private var lowerLang: String { lang.lowercased() }
+    private var isHTML: Bool { ["html", "htm", "svg"].contains(lowerLang) }
+    private var isJS: Bool { ["js", "javascript"].contains(lowerLang) }
+    private var canRun: Bool { !open && (isHTML || isJS) }
+
+    private var runnableHTML: String {
+        if isHTML { return code }
+        let b64 = Data(code.utf8).base64EncodedString()
+        return """
+        <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+        <style>body{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;margin:10px;color:#111;background:transparent;}@media(prefers-color-scheme:dark){body{color:#f2f2f7;}}.err{color:#ff453a;}.dim{opacity:.6;}</style>
+        </head><body><pre id="out" style="white-space:pre-wrap;margin:0"></pre>
+        <script>
+        const out=document.getElementById('out');
+        const add=(cls,args)=>{const d=document.createElement('div');if(cls)d.className=cls;d.textContent=Array.from(args).map(a=>typeof a==='object'?JSON.stringify(a,null,2):String(a)).join(' ');out.appendChild(d);};
+        console.log=(...a)=>add('',a);console.warn=(...a)=>add('',a);console.error=(...a)=>add('err',a);
+        try{
+          const src=decodeURIComponent(escape(atob('\(b64)')));
+          const res=(0,eval)(src);
+          if(res!==undefined)add('dim',['→',res]);
+          if(!out.children.length)add('dim',['(finished with no output)']);
+        }catch(e){add('err',[e.name+': '+e.message]);}
+        </script></body></html>
+        """
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -2234,8 +2258,8 @@ struct CodeBlock: View {
                 Button { UIPasteboard.general.string = code; app.flash("Copied") } label: { Image(systemName: "doc.on.doc").font(.caption) }
                     .buttonStyle(.plain).foregroundStyle(.secondary)
             }
-            if preview {
-                HTMLPreviewView(html: code, height: $h, onLink: { app.open($0) })
+            if preview && canRun {
+                HTMLPreviewView(html: runnableHTML, height: $h, onLink: { app.open($0) })
                     .frame(height: h)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             } else {
@@ -2247,6 +2271,8 @@ struct CodeBlock: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassEffect(.regular, in: .rect(cornerRadius: 16))
         .clipped()
+        .onAppear { if !open && isHTML { preview = true } }
+        .onChange(of: open) { _, isOpen in if !isOpen && isHTML { preview = true } }
     }
 }
 
