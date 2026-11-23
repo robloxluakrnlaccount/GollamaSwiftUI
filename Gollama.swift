@@ -227,9 +227,11 @@ struct HTMLPreviewView: UIViewRepresentable {
         @Binding var height: CGFloat
         init(height: Binding<CGFloat>) { _height = height }
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            webView.evaluateJavaScript("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)") { res, _ in
-                if let h = res as? CGFloat, h > 20 {
-                    DispatchQueue.main.async {
+            Task { @MainActor in
+                if let res = try? await webView.evaluateJavaScript("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"),
+                   let num = res as? NSNumber {
+                    let h = CGFloat(num.doubleValue)
+                    if h > 20 {
                         self.height = min(max(h, 140), 420)
                     }
                 }
@@ -238,13 +240,16 @@ struct HTMLPreviewView: UIViewRepresentable {
     }
 }
 
-@Observable @MainActor final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
+@Observable @MainActor final class SpeechManager {
     var speakingTurnId: Int?
     private let synth = AVSpeechSynthesizer()
+    private let proxy = DelegateProxy()
 
-    override init() {
-        super.init()
-        synth.delegate = self
+    init() {
+        synth.delegate = proxy
+        proxy.onFinish = { [weak self] in
+            Task { @MainActor in self?.speakingTurnId = nil }
+        }
     }
 
     func toggle(turnId: Int, text: String) {
@@ -268,12 +273,10 @@ struct HTMLPreviewView: UIViewRepresentable {
         speakingTurnId = nil
     }
 
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        Task { @MainActor in self.speakingTurnId = nil }
-    }
-
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
-        Task { @MainActor in self.speakingTurnId = nil }
+    private final class DelegateProxy: NSObject, AVSpeechSynthesizerDelegate, @unchecked Sendable {
+        var onFinish: (() -> Void)?
+        func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) { onFinish?() }
+        func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) { onFinish?() }
     }
 
     private static func cleanForSpeech(_ raw: String) -> String {
@@ -1307,12 +1310,12 @@ enum AnswerParser {
     struct Block: Identifiable {
         let id: Int
         var kind: Kind
-        var text = AttributedString()
+        var segments: [(AttributedString, Bool)] = []
         var raw = ""
         var cites: [Int] = []
         var chip: String?
         var suggestChips: [String] = []
-        var tableRows: [[AttributedString]] = []
+        var tableRows: [[[(AttributedString, Bool)]]] = []
     }
 
     struct Parsed {
@@ -1538,7 +1541,7 @@ enum AnswerParser {
                     row.map { cell in
                         var dummy: [String] = []
                         let (clean, _) = extractCites(cell, count: sourceCount)
-                        return attributed(clean, suggests: &dummy, fade: 0)
+                        return attributedSegments(clean, suggests: &dummy, fade: 0)
                     }
                 }
                 out.blocks.append(b)
@@ -1558,7 +1561,7 @@ enum AnswerParser {
             let (clean, cites) = extractCites(raw, count: sourceCount)
             b.cites = cites
             var suggests: [String] = []
-            b.text = attributed(clean, suggests: &suggests, fade: i == lastText ? fadeTail : 0)
+            b.segments = attributedSegments(clean, suggests: &suggests, fade: i == lastText ? fadeTail : 0)
             b.suggestChips = suggests
             out.blocks.append(b)
         }
@@ -1591,7 +1594,7 @@ enum AnswerParser {
         return ms as String
     }
 
-    private static func attributed(_ s: String, suggests: inout [String], fade: Int) -> AttributedString {
+    private static func attributedSegments(_ s: String, suggests: inout [String], fade: Int) -> [(AttributedString, Bool)] {
         // Extract all [[suggest: ...]] tags into chips so every follow-up renders consistently
         var stripped = ""
         let ns = s as NSString
@@ -1606,14 +1609,13 @@ enum AnswerParser {
         stripped = replaceInlineMath(stripped).trimmed
 
         let opts = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        var out = AttributedString()
+        var parts: [(AttributedString, Bool)] = []
         var hl = false
         var buf = ""
         func flush() {
             guard !buf.isEmpty else { return }
-            var seg = (try? AttributedString(markdown: buf, options: opts)) ?? AttributedString(buf)
-            if hl { seg[HighlightAttribute.self] = HighlightAttribute() }
-            out.append(seg)
+            let seg = (try? AttributedString(markdown: buf, options: opts)) ?? AttributedString(buf)
+            parts.append((seg, hl))
             buf = ""
         }
         for ch in stripped {
@@ -1623,16 +1625,27 @@ enum AnswerParser {
         }
         flush()
 
-        if fade > 0 {
-            let total = out.characters.count
-            for k in 0..<min(fade, total) {
-                let s0 = out.index(out.startIndex, offsetByCharacters: total - 1 - k)
-                let e0 = out.index(s0, offsetByCharacters: 1)
-                let alpha = 0.12 + 0.88 * Double(k) / Double(fade)
-                out[s0..<e0].foregroundColor = Color.primary.opacity(alpha)
+        if fade > 0 && !parts.isEmpty {
+            let totalChars = parts.reduce(0) { $0 + $1.0.characters.count }
+            var remainingFade = min(fade, totalChars)
+            var idx = parts.count - 1
+            var offsetFromEnd = 0
+            while idx >= 0 && remainingFade > 0 {
+                var seg = parts[idx].0
+                let count = seg.characters.count
+                for k in 0..<count where offsetFromEnd + k < fade {
+                    let s0 = seg.index(seg.startIndex, offsetByCharacters: count - 1 - k)
+                    let e0 = seg.index(s0, offsetByCharacters: 1)
+                    let alpha = 0.12 + 0.88 * Double(offsetFromEnd + k) / Double(fade)
+                    seg[s0..<e0].foregroundColor = Color.primary.opacity(alpha)
+                    remainingFade -= 1
+                }
+                parts[idx].0 = seg
+                offsetFromEnd += count
+                idx -= 1
             }
         }
-        return out
+        return parts
     }
 }
 
@@ -1708,7 +1721,6 @@ struct MarkdownView: View {
     let sources: [Hit]
     var fading = false
     var onSuggest: ((String) -> Void)?
-    @Environment(\.openURL) private var parentOpenURL
 
     var body: some View {
         let parsed = AnswerParser.parse(text, sourceCount: sources.count, fadeTail: fading ? 16 : 0)
@@ -1718,10 +1730,13 @@ struct MarkdownView: View {
         .font(.body)
         .lineSpacing(3)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .environment(\.openURL, OpenURLAction { url in
-            parentOpenURL(url)
-            return .handled
-        })
+    }
+
+    private func styledText(_ segments: [(AttributedString, Bool)]) -> Text {
+        segments.reduce(Text("")) { acc, seg in
+            let part = seg.1 ? Text(seg.0).customAttribute(HighlightAttribute()) : Text(seg.0)
+            return acc + part
+        }
     }
 
     @ViewBuilder private func blockView(_ b: AnswerParser.Block) -> some View {
@@ -1743,39 +1758,39 @@ struct MarkdownView: View {
             case .divider:
                 Divider().padding(.vertical, 4)
             case .heading(let level):
-                Text(b.text)
+                styledText(b.segments)
                     .font(level <= 2 ? .headline : .subheadline.weight(.semibold))
                     .textRenderer(HighlightTextRenderer())
             case .para:
-                if !b.text.characters.isEmpty {
-                    Text(b.text).textRenderer(HighlightTextRenderer())
+                if !b.segments.isEmpty {
+                    styledText(b.segments).textRenderer(HighlightTextRenderer())
                 }
             case .quote:
                 HStack(alignment: .top, spacing: 10) {
                     RoundedRectangle(cornerRadius: 2).fill(Pal.blue.opacity(0.65)).frame(width: 3)
-                    Text(b.text).foregroundStyle(.secondary).textRenderer(HighlightTextRenderer())
+                    styledText(b.segments).foregroundStyle(.secondary).textRenderer(HighlightTextRenderer())
                 }
                 .padding(.vertical, 2)
             case .bullet(let indent):
                 if let chip = b.chip {
                     VStack(alignment: .leading, spacing: 4) {
                         suggestChip(chip)
-                        if !b.text.characters.isEmpty {
-                            Text(b.text).font(.footnote).foregroundStyle(.secondary).textRenderer(HighlightTextRenderer())
+                        if !b.segments.isEmpty {
+                            styledText(b.segments).font(.footnote).foregroundStyle(.secondary).textRenderer(HighlightTextRenderer())
                         }
                     }
                     .padding(.leading, CGFloat(indent) * 14)
                 } else {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(indent > 0 ? "◦" : "•")
-                        Text(b.text).textRenderer(HighlightTextRenderer())
+                        styledText(b.segments).textRenderer(HighlightTextRenderer())
                     }
                     .padding(.leading, CGFloat(indent) * 14)
                 }
             case .number(let n, let indent):
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text("\(n).").monospacedDigit()
-                    Text(b.text).textRenderer(HighlightTextRenderer())
+                    styledText(b.segments).textRenderer(HighlightTextRenderer())
                 }
                 .padding(.leading, CGFloat(indent) * 14)
             case .table:
@@ -1784,7 +1799,7 @@ struct MarkdownView: View {
                         ForEach(Array(b.tableRows.enumerated()), id: \.offset) { rIdx, row in
                             HStack(spacing: 0) {
                                 ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
-                                    Text(cell)
+                                    styledText(cell)
                                         .font(rIdx == 0 ? .footnote.weight(.semibold) : .footnote)
                                         .padding(.horizontal, 10)
                                         .padding(.vertical, 7)
