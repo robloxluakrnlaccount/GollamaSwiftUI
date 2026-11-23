@@ -2475,6 +2475,42 @@ struct AnswerText: View {
 
 // MARK: - Root, sidebar drawer, in-app browser, video player
 
+/// Masks the app "card" while the sidebar is open.
+/// Rounded with `.rect(corners: .concentric)` the moment the card starts sliding and for the whole slide,
+/// then squared off only as it reaches fully open.
+/// It's `Animatable` on `progress`, so the rounding follows the card's real position even when the sidebar
+/// is opened by a button or finished after a release, not only while a finger is dragging it.
+struct ConcentricCardMask: ViewModifier, Animatable {
+    var progress: CGFloat
+
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    /// 0 = square corners, 1 = full concentric corners.
+    private var rounding: CGFloat {
+        guard progress > 0 else { return 0 }
+        let rampIn = min(progress / 0.03, 1)                       // rounds almost instantly
+        let t = min(max((progress - 0.88) / 0.12, 0), 1)           // squares off only at the very end
+        return rampIn * (1 - t * t * (3 - 2 * t))
+    }
+
+    func body(content: Content) -> some View {
+        content.mask {
+            ZStack {
+                // ignoresSafeArea goes on the fill *before* the clip so the concentric corners are
+                // resolved against the full-screen frame rather than the safe-area-inset one
+                Color.black
+                    .ignoresSafeArea()
+                    .clipShape(.rect(corners: .concentric))
+                Rectangle().opacity(1 - rounding).ignoresSafeArea()
+            }
+            .ignoresSafeArea()
+        }
+    }
+}
+
 struct RootView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.horizontalSizeClass) private var hSize
@@ -2487,16 +2523,6 @@ struct RootView: View {
         guard compact, app.connected else { return 0 }
         let base: CGFloat = app.sidebarOpen ? drawerW : 0
         return min(max((base + drag) / drawerW, 0), 1)
-    }
-
-    /// 0 = square corners, 1 = full concentric corners.
-    /// Pops in over the first few percent of the slide, then eases back to 0 as the drawer finishes opening.
-    private var cardRounding: CGFloat {
-        guard progress > 0 else { return 0 }
-        let rampIn = min(progress / 0.05, 1)
-        let t = min(max((progress - 0.55) / 0.45, 0), 1)
-        let rampOut = 1 - t * t * (3 - 2 * t)
-        return rampIn * rampOut
     }
 
     var body: some View {
@@ -2523,19 +2549,7 @@ struct RootView: View {
                         Color.black.opacity(0.14 * progress).onTapGesture { app.closeSidebar() }
                     }
                 }
-                .mask {
-                    // Rounded (concentric with the device corners) as soon as the sidebar starts to open,
-                    // then relaxes back to a square by the time it is fully open.
-                    ZStack {
-                        // ignoresSafeArea goes on the shape's own view *before* the clip, so the concentric
-                        // corners are resolved against the full-screen frame instead of the safe-area inset one
-                        Color.black
-                            .ignoresSafeArea()
-                            .clipShape(.rect(corners: .concentric))
-                        Rectangle().opacity(1 - cardRounding).ignoresSafeArea()
-                    }
-                    .ignoresSafeArea()
-                }
+                .modifier(ConcentricCardMask(progress: progress))
                 .shadow(color: .black.opacity(0.28 * progress), radius: 24, x: -6)
                 .offset(x: progress * drawerW)
                 .transition(.opacity)
