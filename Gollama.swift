@@ -2547,7 +2547,10 @@ struct RootView: View {
                 .background(AmbientBackground())
                 .overlay {
                     if progress > 0 {
-                        Color.black.opacity(0.14 * progress).onTapGesture { app.closeSidebar() }
+                        Color.black.opacity(0.14 * progress)
+                            .contentShape(Rectangle())
+                            .onTapGesture { app.closeSidebar() }
+                            .gesture(sidebarDrag)
                     }
                 }
                 .modifier(ConcentricCardMask(progress: progress))
@@ -2559,7 +2562,20 @@ struct RootView: View {
             }
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
-        .simultaneousGesture(sidebarDrag)
+        // The drag lives on a thin strip along the left edge (closed) or on the scrim over the card (open),
+        // not on the whole screen. A screen-wide DragGesture makes UIKit cancel touches in segmented controls
+        // and sliders as soon as the drag starts, which is what killed dragging between segments.
+        .overlay(alignment: .leading) {
+            if compact, app.connected, !app.sidebarOpen, app.mainTab == .mode {
+                Color.clear
+                    .frame(width: 24)
+                    .frame(maxHeight: .infinity)
+                    .padding(.top, 110)
+                    .padding(.bottom, 100)
+                    .contentShape(Rectangle())
+                    .gesture(sidebarDrag)
+            }
+        }
         .overlay(alignment: .top) {
             if let n = app.notice {
                 Text(n)
@@ -2583,17 +2599,15 @@ struct RootView: View {
         .animation(.smooth(duration: 0.25), value: app.notice)
     }
 
-    /// Swipe from the left edge to open the sidebar, swipe left (anywhere) to close it. Only on the AI Mode tab.
+    /// Swipe from the left edge strip to open the sidebar, swipe left on the card to close it. Only on the AI Mode tab.
     private var sidebarDrag: some Gesture {
         DragGesture(minimumDistance: 14, coordinateSpace: .global)
             .onChanged { v in
                 guard compact, app.connected else { return }
                 guard abs(v.translation.width) > abs(v.translation.height) * 1.2 else { return }
                 if app.sidebarOpen {
-                    if v.startLocation.x >= drawerW - 20 {
-                        drag = min(0, max(-drawerW, v.translation.width))
-                    }
-                } else if app.mainTab == .mode && v.startLocation.x < 60 {
+                    drag = min(0, max(-drawerW, v.translation.width))
+                } else if app.mainTab == .mode {
                     drag = min(drawerW, max(0, v.translation.width))
                 }
             }
