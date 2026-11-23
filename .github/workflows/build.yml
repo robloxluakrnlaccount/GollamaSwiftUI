@@ -15,6 +15,12 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - name: Prepare app icon
+        run: |
+          mkdir -p Assets.xcassets/AppIcon.appiconset
+          sips -z 1024 1024 -s format jpeg -s formatOptions 100 iosappicon.png --out /tmp/GollamaAppIcon.jpg
+          sips -z 1024 1024 -s format png /tmp/GollamaAppIcon.jpg --out Assets.xcassets/AppIcon.appiconset/AppIcon.png
+
       - name: Generate Xcode project
         run: xcodegen generate
 
