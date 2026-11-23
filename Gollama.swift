@@ -386,28 +386,31 @@ struct FlowLayout: Layout {
     var spacing: CGFloat = 8
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let maxW = proposal.width ?? .infinity
+        let childProposal = maxW.isFinite ? ProposedViewSize(width: maxW, height: nil) : .unspecified
         var x: CGFloat = 0
         var y: CGFloat = 0
         var rowH: CGFloat = 0
         var w: CGFloat = 0
         for s in subviews {
-            let sz = s.sizeThatFits(.unspecified)
+            let sz = s.sizeThatFits(childProposal)
             if x + sz.width > maxW && x > 0 { y += rowH + spacing; x = 0; rowH = 0 }
             x += sz.width + spacing
             rowH = max(rowH, sz.height)
-            w = max(w, x - spacing)
+            w = max(w, min(maxW, x - spacing))
         }
-        return CGSize(width: w, height: y + rowH)
+        return CGSize(width: maxW.isFinite ? min(maxW, w) : w, height: y + rowH)
     }
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let childProposal = ProposedViewSize(width: bounds.width, height: nil)
         var x = bounds.minX
         var y = bounds.minY
         var rowH: CGFloat = 0
         for s in subviews {
-            let sz = s.sizeThatFits(.unspecified)
+            let sz = s.sizeThatFits(childProposal)
             if x + sz.width > bounds.maxX && x > bounds.minX { y += rowH + spacing; x = bounds.minX; rowH = 0 }
-            s.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(sz))
-            x += sz.width + spacing
+            let clampedW = min(sz.width, bounds.width)
+            s.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(width: clampedW, height: sz.height))
+            x += clampedW + spacing
             rowH = max(rowH, sz.height)
         }
     }
@@ -2796,6 +2799,7 @@ struct AIModeRoot: View {
                                     trailingToolbar
                                 }
                         }
+                        .frame(width: geo.size.width, height: geo.size.height)
                         .offset(x: offset)
                         .overlay {
                             if offset > 0 {
@@ -2806,6 +2810,8 @@ struct AIModeRoot: View {
                             }
                         }
                     }
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .clipped()
                     .simultaneousGesture(
                         DragGesture(minimumDistance: 24, coordinateSpace: .global)
                             .onChanged { v in
@@ -3146,6 +3152,7 @@ struct TurnView: View {
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
             .glassEffect(.regular, in: .rect(cornerRadius: 26))
+            .clipped()
         }
         .sheet(item: $playingVideo) { item in
             VideoPlayerSheet(url: item.url)
