@@ -140,7 +140,7 @@ struct SendButton: View {
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
-        .accessibilityLabel(systemName == "stop.fill" ? "Stop" : "Send")
+        .accessibilityLabel(tr(systemName == "stop.fill" ? "Stop" : "Send"))
     }
 }
 
@@ -732,6 +732,7 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
     // chrome
     var mainTab: MainTab = .search
     var sidebarOpen = false
+    var showSettings = false
     var browser: BrowserItem?
     var player: PlayerItem?
     var speakingKey: String?
@@ -1131,7 +1132,7 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
 
     func sendMode(_ raw: String, force: Bool = false, reuse: ModeTurn? = nil, inherit: ModeTurn? = nil) async {
         guard let c = client else { return }
-        if pending.contains(where: { $0.state == "uploading" || $0.state == "processing" }) { flash("Wait for the attachment to finish."); return }
+        if pending.contains(where: { $0.state == "uploading" || $0.state == "processing" }) { flash(tr("Wait for the attachment to finish.")); return }
         let text = raw.trimmed
         if reuse == nil && inherit == nil && text.isEmpty && pending.isEmpty { return }
         ensureChat()
@@ -1249,17 +1250,17 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
 
     func copyAnswer(_ t: ModeTurn) {
         UIPasteboard.general.string = TextClean.copyText(t.answer)
-        flash("Copied")
+        flash(tr("Copied"))
     }
 
     func copyMarkdown(_ t: ModeTurn) {
         UIPasteboard.general.string = t.answer
-        flash("Copied as Markdown")
+        flash(tr("Copied as Markdown"))
     }
 
     func copySources(_ t: ModeTurn) {
         UIPasteboard.general.string = t.sources.enumerated().map { "[\($0.offset + 1)] \($0.element.title) - \($0.element.url)" }.joined(separator: "\n")
-        flash("Sources copied")
+        flash(tr("Sources copied"))
     }
 
     private func turnFinished(_ t: ModeTurn) {
@@ -1306,10 +1307,10 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         if item.supportedContentTypes.contains(where: { $0.conforms(to: .movie) }) {
             if let v = try? await item.loadTransferable(type: VideoFile.self) {
                 await addVideo(url: v.url, name: "video-\(pending.count + 1).mov")
-            } else { flash("Couldn't read that video.") }
+            } else { flash(tr("Couldn't read that video.")) }
         } else if let data = try? await item.loadTransferable(type: Data.self) {
             addImage(data: data, name: "photo-\(pending.count + 1).jpg")
-        } else { flash("Couldn't read that photo.") }
+        } else { flash(tr("Couldn't read that photo.")) }
     }
 
     func attach(file url: URL) async {
@@ -1319,14 +1320,14 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         if type?.conforms(to: .movie) == true {
             let dst = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "-" + url.lastPathComponent)
             if (try? FileManager.default.copyItem(at: url, to: dst)) != nil { await addVideo(url: dst, name: url.lastPathComponent) }
-            else { flash("Couldn't read that video.") }
+            else { flash(tr("Couldn't read that video.")) }
         } else if type?.conforms(to: .image) == true {
             if let d = try? Data(contentsOf: url) { addImage(data: d, name: url.lastPathComponent) }
         } else if let d = try? Data(contentsOf: url) {
             let head = d.prefix(60_000)
             var text: String?
             for cut in 0...3 where text == nil { text = String(data: head.dropLast(cut), encoding: .utf8) }
-            guard let t = text else { flash("\(url.lastPathComponent) isn't a text file."); return }
+            guard let t = text else { flash(String(format: tr("%@ isn't a text file."), url.lastPathComponent)); return }
             let a = Attachment(kind: .file, name: url.lastPathComponent)
             a.text = String(t.prefix(20000))
             pending.append(a)
@@ -2173,9 +2174,9 @@ struct LiveHTMLBlock: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Picker("View", selection: $showPreview) {
-                    Text("Preview").tag(true)
-                    Text("Code").tag(false)
+                Picker(tr("View"), selection: $showPreview) {
+                    Text(tr("Preview")).tag(true)
+                    Text(tr("Code")).tag(false)
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 150)
@@ -2192,7 +2193,7 @@ struct LiveHTMLBlock: View {
                 }
             }
             if open {
-                HStack(spacing: 8) { ThinkingDots(); Text("Writing the interactive block…").font(.footnote).foregroundStyle(.secondary) }
+                HStack(spacing: 8) { ThinkingDots(); Text(tr("Writing the interactive block…")).font(.footnote).foregroundStyle(.secondary) }
                     .padding(.vertical, 12)
             } else if showPreview {
                 HTMLPreviewView(html: code, height: $h, onLink: { app.open($0) })
@@ -2213,10 +2214,10 @@ struct LiveHTMLBlock: View {
             NavigationStack {
                 HTMLPreviewView(html: code, height: .constant(600), onLink: { app.open($0) })
                     .ignoresSafeArea(edges: .bottom)
-                    .navigationTitle("HTML Preview")
+                    .navigationTitle(tr("HTML Preview"))
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
-                        ToolbarItem(placement: .topBarTrailing) { Button("Done") { fullScreen = false } }
+                        ToolbarItem(placement: .topBarTrailing) { Button(tr("Done")) { fullScreen = false } }
                     }
             }
         }
@@ -2268,7 +2269,7 @@ struct CodeBlock: View {
                     Button(preview ? "Code" : "Run", systemImage: preview ? "chevron.left.forwardslash.chevron.right" : "play.fill") { preview.toggle() }
                         .font(.caption.weight(.semibold)).buttonStyle(.plain).foregroundStyle(Pal.blue)
                 }
-                Button { UIPasteboard.general.string = code; app.flash("Copied") } label: { Image(systemName: "doc.on.doc").font(.caption) }
+                Button { UIPasteboard.general.string = code; app.flash(tr("Copied")) } label: { Image(systemName: "doc.on.doc").font(.caption) }
                     .buttonStyle(.plain).foregroundStyle(.secondary)
             }
             if preview && canRun {
@@ -2539,8 +2540,8 @@ struct RootView: View {
                 }
                 // the whole app slides over like a card, and the card is rounded to the device's corners while the sidebar is open
                 TabView(selection: $app.mainTab) {
-                    Tab("Search", systemImage: "magnifyingglass", value: MainTab.search) { SearchRoot() }
-                    Tab("AI Mode", systemImage: "sparkles", value: MainTab.mode) { AIModeRoot() }
+                    Tab(tr("Search"), systemImage: "magnifyingglass", value: MainTab.search) { SearchRoot() }
+                    Tab(tr("AI Mode"), systemImage: "sparkles", value: MainTab.mode) { AIModeRoot() }
                 }
                 .tabViewStyle(.sidebarAdaptable)
                 .background(AmbientBackground())
@@ -2572,6 +2573,8 @@ struct RootView: View {
         }
         .fullScreenCover(item: $app.browser) { BrowserSheet(item: $0) }
         .sheet(item: $app.player) { PlayerSheet(item: $0) }
+        .sheet(isPresented: $app.showSettings) { SettingsView() }
+        .preferredColorScheme(Prefs.shared.theme.scheme)
         .environment(\.openURL, OpenURLAction { url in
             app.open(url)
             return .handled
@@ -2684,8 +2687,9 @@ struct ServerMenu: View {
     var body: some View {
         Menu {
             if let a = app.address { Text(a.display) }
-            if !app.modelName.isEmpty { Text("Model: \(app.modelName)") }
-            Button("Disconnect", systemImage: "wifi.slash", role: .destructive) { app.disconnect() }
+            if !app.modelName.isEmpty { Text(String(format: tr("Model: %@"), app.modelName)) }
+            Button(tr("Settings"), systemImage: "gearshape") { app.showSettings = true }
+            Button(tr("Disconnect"), systemImage: "wifi.slash", role: .destructive) { app.disconnect() }
         } label: {
             GlassIcon(name: "ellipsis", size: 44)
         }
@@ -2727,12 +2731,12 @@ struct ConnectScreen: View {
         ScrollView {
             VStack(spacing: 20) {
                 GollamaLogo(size: 60).padding(.top, 44)
-                Text("Connect to Gollama").font(.title3.weight(.medium))
+                Text(tr("Connect to Gollama")).font(.title3.weight(.medium))
 
                 GlassEffectContainer(spacing: 16) {
                     VStack(spacing: 14) {
-                        Picker("Connection", selection: $mode) {
-                            ForEach(ConnectMode.allCases) { Text($0.rawValue).tag($0) }
+                        Picker(tr("Connection"), selection: $mode) {
+                            ForEach(ConnectMode.allCases) { Text(tr($0.rawValue)).tag($0) }
                         }
                         .pickerStyle(.segmented)
                         .padding(6)
@@ -2773,20 +2777,20 @@ struct ConnectScreen: View {
     // private: IP + port (required), or scan
     private var privateCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("Same Wi-Fi as your computer", systemImage: "wifi").font(.headline)
-            Text("Enter the computer's IP and the port Gollama's network server uses, or scan to find it.")
+            Label(tr("Same Wi-Fi as your computer"), systemImage: "wifi").font(.headline)
+            Text(tr("Enter the computer's IP and the port Gollama's network server uses, or scan to find it."))
                 .font(.footnote).foregroundStyle(.secondary)
             HStack(spacing: 10) {
                 field("IP address", text: $host, focus: .host, keyboard: .numbersAndPunctuation)
                 field("Port", text: $port, focus: .port).frame(width: 96)
             }
             HStack(spacing: 10) {
-                Text("Scan ports up to").font(.footnote).foregroundStyle(.secondary)
+                Text(tr("Scan ports up to")).font(.footnote).foregroundStyle(.secondary)
                 field("Port", text: $portTo, focus: .portTo).frame(width: 96)
                 Spacer()
             }
             Button { scanning ? cancelScan() : startScan() } label: {
-                HStack { if scanning { ProgressView() }; Text(scanning ? "Stop scanning" : "Scan network") }.frame(maxWidth: .infinity)
+                HStack { if scanning { ProgressView() }; Text(tr(scanning ? "Stop scanning" : "Scan network")) }.frame(maxWidth: .infinity)
             }
             .buttonStyle(.glass).controlSize(.large)
             if scanning { ProgressView(value: progress).tint(Pal.blue) }
@@ -2809,7 +2813,7 @@ struct ConnectScreen: View {
                 .buttonStyle(.glass)
             }
             if scannedOnce && !scanning && found.isEmpty {
-                Text("No Gollama server found. Check the server is on and both devices share the same Wi-Fi.")
+                Text(tr("No Gollama server found. Check the server is on and both devices share the same Wi-Fi."))
                     .font(.footnote).foregroundStyle(.secondary)
             }
         }
@@ -2820,11 +2824,11 @@ struct ConnectScreen: View {
     // public: a URL (server on the internet or a Cloudflare Tunnel), port optional
     private var publicCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("Server or tunnel URL", systemImage: "globe").font(.headline)
-            Text("Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.")
+            Label(tr("Server or tunnel URL"), systemImage: "globe").font(.headline)
+            Text(tr("Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com."))
                 .font(.footnote).foregroundStyle(.secondary)
             field("https://your-server.example.com", text: $publicURL, focus: .url, keyboard: .URL)
-            Toggle("Use a port", isOn: $usePort.animation()).tint(Pal.blue)
+            Toggle(tr("Use a port"), isOn: $usePort.animation()).tint(Pal.blue)
             if usePort { field("Port (e.g. 8765)", text: $publicPort, focus: .publicPort) }
         }
         .padding(18).frame(maxWidth: .infinity, alignment: .leading)
@@ -2835,7 +2839,7 @@ struct ConnectScreen: View {
         VStack(spacing: 12) {
             field("Access code (if the server has one)", text: $code, focus: .code, secure: true)
             Button { connect() } label: {
-                HStack { if connecting { ProgressView().tint(.white) }; Text("Connect") }.frame(maxWidth: .infinity)
+                HStack { if connecting { ProgressView().tint(.white) }; Text(tr("Connect")) }.frame(maxWidth: .infinity)
             }
             .buttonStyle(.glassProminent).tint(Pal.green).controlSize(.large)
             .disabled(connecting)
@@ -2993,15 +2997,15 @@ struct HomeScreen: View {
                     HStack { Spacer(); ServerMenu() }.padding(.horizontal, 16).padding(.top, 6)
                     Spacer(minLength: 30)
                     GollamaLogo(size: 64).padding(.bottom, 24)
-                    SearchField(text: $text, placeholder: "Search or ask anything", height: 52, focused: $focused) { app.submit(text) }
+                    SearchField(text: $text, placeholder: tr("Search or ask anything"), height: 52, focused: $focused) { app.submit(text) }
                         .padding(.horizontal, 20)
                     HStack(spacing: 12) {
-                        Button("Gollama Search") { app.submit(text) }.buttonStyle(.glass)
+                        Button(tr("Gollama Search")) { app.submit(text) }.buttonStyle(.glass)
                         Button {
                             let t = text.trimmed
                             app.mainTab = .mode
                             if !t.isEmpty { text = ""; Task { await app.sendMode(t) } }
-                        } label: { Label("Ask AI Mode", systemImage: "sparkles") }
+                        } label: { Label(tr("Ask AI Mode"), systemImage: "sparkles") }
                             .buttonStyle(.glassProminent).tint(Pal.purple)
                     }
                     .controlSize(.large)
@@ -3010,7 +3014,7 @@ struct HomeScreen: View {
                     if !app.recents.isEmpty || !app.suggestions.isEmpty {
                         VStack(alignment: .leading, spacing: 10) {
                             if !app.recents.isEmpty {
-                                Text("Recent").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
+                                Text(tr("Recent")).font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
                                 FlowLayout(spacing: 8) {
                                     ForEach(Array(app.recents.prefix(5)), id: \.self) { r in
                                         Button { text = r; app.submit(r) } label: {
@@ -3020,7 +3024,7 @@ struct HomeScreen: View {
                                         }
                                         .buttonStyle(.plain)
                                         .contextMenu {
-                                            Button("Delete", systemImage: "trash", role: .destructive) {
+                                            Button(tr("Delete"), systemImage: "trash", role: .destructive) {
                                                 withAnimation(.smooth(duration: 0.2)) {
                                                     app.removeRecent(r)
                                                 }
@@ -3030,7 +3034,7 @@ struct HomeScreen: View {
                                 }
                             }
                             if !app.suggestions.isEmpty {
-                                Text("Try").font(.footnote.weight(.semibold)).foregroundStyle(.secondary).padding(.top, 6)
+                                Text(tr("Try")).font(.footnote.weight(.semibold)).foregroundStyle(.secondary).padding(.top, 6)
                                 FlowLayout(spacing: 8) {
                                     ForEach(app.suggestions.prefix(6)) { s in
                                         Button { text = s.send; app.submit(s.send) } label: {
@@ -3082,7 +3086,7 @@ struct ResultsScreen: View {
         VStack(spacing: 10) {
             HStack(spacing: 10) {
                 Button { app.goHome() } label: { GollamaLogo(size: 24) }.buttonStyle(.plain)
-                SearchField(text: $text, placeholder: "Search", height: 44, focused: $focused) { app.submit(text) }
+                SearchField(text: $text, placeholder: tr("Search"), height: 44, focused: $focused) { app.submit(text) }
                 ServerMenu()
             }
             GlassEffectContainer(spacing: 8) {
@@ -3152,7 +3156,7 @@ struct HitRow: View {
         .buttonStyle(.plain)
         .contextMenu {
             if let u = URL(string: hit.url) { ShareLink(item: u) }
-            Button("Copy link", systemImage: "doc.on.doc") { UIPasteboard.general.string = hit.url }
+            Button(tr("Copy link"), systemImage: "doc.on.doc") { UIPasteboard.general.string = hit.url }
         }
     }
 }
@@ -3164,9 +3168,9 @@ struct AllTab: View {
             LazyVStack(alignment: .leading, spacing: 14) {
                 if let c = app.corrected {
                     VStack(alignment: .leading, spacing: 3) {
-                        (Text("Showing results for ").foregroundStyle(.secondary) + Text(c).foregroundStyle(Pal.blue).fontWeight(.medium))
+                        (Text(tr("Showing results for") + " ").foregroundStyle(.secondary) + Text(c).foregroundStyle(Pal.blue).fontWeight(.medium))
                         Button { app.submit(app.original, nocorrect: true) } label: {
-                            Text("Search instead for \(app.original)").font(.footnote).foregroundStyle(Pal.blue)
+                            Text(String(format: tr("Search instead for %@"), app.original)).font(.footnote).foregroundStyle(Pal.blue)
                         }
                     }
                     .font(.subheadline)
@@ -3214,7 +3218,7 @@ struct OverviewCard: View {
         return VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
                 Spark(size: 20)
-                Text("AI Overview").font(.title3.weight(.medium))
+                Text(tr("AI Overview")).font(.title3.weight(.medium))
                 Spacer()
                 if ov.done && !ov.text.isEmpty {
                     Button { app.toggleSpeech(key: speakKey, raw: ov.text) } label: {
@@ -3271,7 +3275,7 @@ struct OverviewCard: View {
 
             if ov.done && ov.error == nil && !ov.text.isEmpty {
                 HStack(spacing: 8) {
-                    TextField("Ask a follow-up", text: $followUp).focused($focused).submitLabel(.send).onSubmit { send() }
+                    TextField(tr("Ask a follow-up"), text: $followUp).focused($focused).submitLabel(.send).onSubmit { send() }
                     SendButton(enabled: !followUp.trimmed.isEmpty, size: 30) { send() }
                 }
                 .padding(.leading, 16)
@@ -3356,10 +3360,10 @@ struct ImagePreview: View {
             .clipShape(RoundedRectangle(cornerRadius: 20))
             if !item.title.isEmpty { Text(item.title).font(.subheadline).multilineTextAlignment(.center) }
             HStack(spacing: 12) {
-                Button { if let u = URL(string: item.page) { dismiss(); openURL(u) } } label: { Label("Visit page", systemImage: "safari") }
+                Button { if let u = URL(string: item.page) { dismiss(); openURL(u) } } label: { Label(tr("Visit page"), systemImage: "safari") }
                     .buttonStyle(.glassProminent).tint(Pal.blue)
-                if let u = item.full { ShareLink(item: u) { Label("Share", systemImage: "square.and.arrow.up") }.buttonStyle(.glass) }
-                Button("Done") { dismiss() }.buttonStyle(.glass)
+                if let u = item.full { ShareLink(item: u) { Label(tr("Share"), systemImage: "square.and.arrow.up") }.buttonStyle(.glass) }
+                Button(tr("Done")) { dismiss() }.buttonStyle(.glass)
             }
         }
         .padding(20)
@@ -3436,8 +3440,9 @@ struct AIModeRoot: View {
                     Button { app.newChat() } label: { Image(systemName: "square.and.pencil") }
                     Menu {
                         if let a = app.address { Text(a.display) }
-                        if !app.modelName.isEmpty { Text("Model: \(app.modelName)") }
-                        Button("Disconnect", systemImage: "wifi.slash", role: .destructive) { app.disconnect() }
+                        if !app.modelName.isEmpty { Text(String(format: tr("Model: %@"), app.modelName)) }
+                        Button(tr("Settings"), systemImage: "gearshape") { app.showSettings = true }
+                        Button(tr("Disconnect"), systemImage: "wifi.slash", role: .destructive) { app.disconnect() }
                     } label: { Image(systemName: "ellipsis") }
                 }
             }
@@ -3465,7 +3470,7 @@ struct HistoryList: View {
     var body: some View {
         VStack(spacing: 10) {
             HStack {
-                Text("History").font(.title3.weight(.semibold))
+                Text(tr("History")).font(.title3.weight(.semibold))
                 Spacer()
                 Button { app.newChat(); picked() } label: { GlassIcon(name: "square.and.pencil", size: 38) }.buttonStyle(.plain)
             }
@@ -3474,7 +3479,7 @@ struct HistoryList: View {
 
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Search chats", text: $filter).autocorrectionDisabled()
+                TextField(tr("Search chats"), text: $filter).autocorrectionDisabled()
             }
             .padding(.horizontal, 14)
             .frame(height: 40)
@@ -3497,7 +3502,7 @@ struct HistoryList: View {
                         }
                         .listRowBackground(c.id == app.chatId ? Pal.blue.opacity(0.18) : Color.clear)
                         .swipeActions {
-                            Button(role: .destructive) { Task { await app.deleteChat(c.id) } } label: { Label("Delete", systemImage: "trash") }
+                            Button(role: .destructive) { Task { await app.deleteChat(c.id) } } label: { Label(tr("Delete"), systemImage: "trash") }
                         }
                     }
                 }
@@ -3506,13 +3511,13 @@ struct HistoryList: View {
             }
 
             if !app.chats.isEmpty {
-                Button("Clear all history", role: .destructive) { confirmClear = true }
+                Button(tr("Clear all history"), role: .destructive) { confirmClear = true }
                     .font(.footnote)
                     .padding(.bottom, 10)
             }
         }
-        .confirmationDialog("Delete every chat on this device?", isPresented: $confirmClear, titleVisibility: .visible) {
-            Button("Delete all", role: .destructive) { Task { await app.clearChats() } }
+        .confirmationDialog(tr("Delete every chat on this device?"), isPresented: $confirmClear, titleVisibility: .visible) {
+            Button(tr("Delete all"), role: .destructive) { Task { await app.clearChats() } }
         }
         .task { await app.loadChats() }
     }
@@ -3562,8 +3567,8 @@ struct EmptyChat: View {
     var body: some View {
         VStack(spacing: 14) {
             Spark(size: 36)
-            Text("Ask anything").font(.title2.weight(.medium))
-            Text("AI Mode searches the web and answers with sources.").font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            Text(tr("Ask anything")).font(.title2.weight(.medium))
+            Text(tr("AI Mode searches the web and answers with sources.")).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
             if !app.suggestions.isEmpty {
                 FlowLayout(spacing: 8) {
                     ForEach(app.suggestions.prefix(6)) { s in
@@ -3610,15 +3615,15 @@ struct EditBox: View {
     var body: some View {
         @Bindable var app = app
         VStack(alignment: .trailing, spacing: 10) {
-            TextField("Message", text: $app.editText, axis: .vertical)
+            TextField(tr("Message"), text: $app.editText, axis: .vertical)
                 .lineLimit(1...8)
                 .focused($focused)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
                 .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 22))
             HStack(spacing: 10) {
-                Button("Cancel") { app.cancelEdit() }.buttonStyle(.glass)
-                Button("Submit") { app.submitEdit(turn) }
+                Button(tr("Cancel")) { app.cancelEdit() }.buttonStyle(.glass)
+                Button(tr("Submit")) { app.submitEdit(turn) }
                     .buttonStyle(.glassProminent).tint(Pal.blue)
                     .disabled(app.editText.trimmed.isEmpty)
             }
@@ -3632,7 +3637,7 @@ struct VideoTile: View {
     let video: VideoRef
     @Environment(AppModel.self) private var app
     var body: some View {
-        Button { if let u = video.url { app.player = PlayerItem(url: u) } else { app.flash("That video isn't on this device anymore.") } } label: {
+        Button { if let u = video.url { app.player = PlayerItem(url: u) } else { app.flash(tr("That video isn't on this device anymore.")) } } label: {
             ZStack {
                 if let t = video.thumb { Image(uiImage: t).resizable().scaledToFill() } else { Color.secondary.opacity(0.25) }
                 Image(systemName: "play.fill").font(.title3).foregroundStyle(.white)
@@ -3667,10 +3672,10 @@ struct TurnActions: View {
             icon(app.speakingKey == key ? "stop.circle.fill" : "speaker.wave.2", "Read aloud") { app.toggleSpeech(key: key, raw: turn.answer) }
             icon("arrow.clockwise", "Try again") { app.retry(turn, force: false) }
             Menu {
-                Button("Branch in new chat", systemImage: "arrow.triangle.branch") { Task { await app.branchChat(from: turn) } }
-                Button("Try again without searching", systemImage: "text.magnifyingglass") { app.retry(turn, force: true) }
-                Button("Copy as Markdown", systemImage: "doc.richtext") { app.copyMarkdown(turn) }
-                if !turn.sources.isEmpty { Button("Copy sources", systemImage: "link") { app.copySources(turn) } }
+                Button(tr("Branch in new chat"), systemImage: "arrow.triangle.branch") { Task { await app.branchChat(from: turn) } }
+                Button(tr("Try again without searching"), systemImage: "text.magnifyingglass") { app.retry(turn, force: true) }
+                Button(tr("Copy as Markdown"), systemImage: "doc.richtext") { app.copyMarkdown(turn) }
+                if !turn.sources.isEmpty { Button(tr("Copy sources"), systemImage: "link") { app.copySources(turn) } }
             } label: {
                 Image(systemName: "ellipsis").font(.system(size: 15)).frame(width: 36, height: 34).contentShape(Rectangle())
             }
@@ -3723,8 +3728,8 @@ struct TurnView: View {
                         .padding(.horizontal, 16).padding(.vertical, 10)
                         .glassEffect(.regular.tint(Pal.blue.opacity(0.3)), in: .rect(cornerRadius: 22))
                         .contextMenu {
-                            Button("Edit", systemImage: "pencil") { app.beginEdit(turn) }
-                            Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = turn.text; app.flash("Copied") }
+                            Button(tr("Edit"), systemImage: "pencil") { app.beginEdit(turn) }
+                            Button(tr("Copy"), systemImage: "doc.on.doc") { UIPasteboard.general.string = turn.text; app.flash(tr("Copied")) }
                         }
                 }
             }
@@ -3742,9 +3747,9 @@ struct TurnView: View {
             if let e = turn.error { Text(e).foregroundStyle(.red).font(.subheadline) }
             if turn.noResultsFor != nil {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("There isn't a result available for this search.").fontWeight(.medium)
-                    Text("You can still get an answer from the model, but it won't be backed by sources.").font(.subheadline).foregroundStyle(.secondary)
-                    Button("Continue anyway") { Task { await app.sendMode(turn.text, force: true, reuse: turn) } }
+                    Text(tr("There isn't a result available for this search.")).fontWeight(.medium)
+                    Text(tr("You can still get an answer from the model, but it won't be backed by sources.")).font(.subheadline).foregroundStyle(.secondary)
+                    Button(tr("Continue anyway")) { Task { await app.sendMode(turn.text, force: true, reuse: turn) } }
                         .buttonStyle(.glassProminent).tint(Pal.blue)
                 }
             }
@@ -3805,15 +3810,15 @@ struct ChatInputBar: View {
                     HStack(spacing: 8) { ForEach(app.pending) { AttachChip(att: $0) } }
                 }
             }
-            TextField("Ask AI Mode", text: $text, axis: .vertical)
+            TextField(tr("Ask AI Mode"), text: $text, axis: .vertical)
                 .lineLimit(1...5)
                 .focused($focused)
                 .padding(.top, 2)
 
             HStack(spacing: 8) {
                 Menu {
-                    Button("Photos & Videos", systemImage: "photo.on.rectangle") { showPhotos = true }
-                    Button("Files", systemImage: "doc") { showFiles = true }
+                    Button(tr("Photos & Videos"), systemImage: "photo.on.rectangle") { showPhotos = true }
+                    Button(tr("Files"), systemImage: "doc") { showFiles = true }
                 } label: {
                     Image(systemName: "plus").font(.system(size: 15, weight: .semibold)).foregroundStyle(.primary)
                         .frame(width: 32, height: 32).glassEffect(.regular.interactive(), in: .circle)
@@ -3822,9 +3827,9 @@ struct ChatInputBar: View {
                 .buttonStyle(.plain)
 
                 Menu {
-                    Picker("Model", selection: $app.tier) {
-                        Text("Fast").tag("fast")
-                        Text("Pro").tag("pro")
+                    Picker(tr("Model"), selection: $app.tier) {
+                        Text(tr("Fast")).tag("fast")
+                        Text(tr("Pro")).tag("pro")
                     }
                 } label: {
                     HStack(spacing: 4) {
@@ -3912,4 +3917,1976 @@ struct AttachChip: View {
         .frame(maxWidth: 260)
         .glassEffect(.regular, in: .capsule)
     }
+}
+
+
+// MARK: - Appearance, languages & settings
+
+/// Light, dark, or follow the device.
+enum AppTheme: String, CaseIterable, Identifiable {
+    case auto, light, dark
+    var id: String { rawValue }
+    var scheme: ColorScheme? {
+        switch self {
+        case .auto: nil
+        case .light: .light
+        case .dark: .dark
+        }
+    }
+    var titleKey: String {
+        switch self {
+        case .auto: "Auto"
+        case .light: "Light"
+        case .dark: "Dark"
+        }
+    }
+    var icon: String {
+        switch self {
+        case .auto: "circle.lefthalf.filled"
+        case .light: "sun.max.fill"
+        case .dark: "moon.fill"
+        }
+    }
+}
+
+/// Every language the interface can be shown in. `.system` follows the device.
+enum AppLanguage: String, CaseIterable, Identifiable {
+    case system, en, es, fr, de, it, pt, nl, sv, pl, tr, ru, uk, ar, he, hi, th, vi, idn, ja, ko, zhHans, zhHant, cs
+    var id: String { rawValue }
+
+    /// Each language is listed under its own name so people can always find theirs.
+    var nativeName: String {
+        switch self {
+        case .system: ""
+        case .en: "English"
+        case .es: "Español"
+        case .fr: "Français"
+        case .de: "Deutsch"
+        case .it: "Italiano"
+        case .pt: "Português"
+        case .nl: "Nederlands"
+        case .sv: "Svenska"
+        case .pl: "Polski"
+        case .tr: "Türkçe"
+        case .ru: "Русский"
+        case .uk: "Українська"
+        case .ar: "العربية"
+        case .he: "עברית"
+        case .hi: "हिन्दी"
+        case .th: "ไทย"
+        case .vi: "Tiếng Việt"
+        case .idn: "Bahasa Indonesia"
+        case .ja: "日本語"
+        case .ko: "한국어"
+        case .zhHans: "简体中文"
+        case .zhHant: "繁體中文"
+        case .cs: "Čeština"
+        }
+    }
+
+    /// The device's preferred language, mapped to one we ship (English if we don't have it).
+    static var device: AppLanguage {
+        for code in Locale.preferredLanguages {
+            let c = code.lowercased()
+            if c.hasPrefix("zh-hant") || c.hasPrefix("zh-tw") || c.hasPrefix("zh-hk") || c.hasPrefix("zh-mo") { return .zhHant }
+            if c.hasPrefix("zh") { return .zhHans }
+            if c.hasPrefix("iw") { return .he }
+            let base = String(c.prefix(2))
+            if base == "id" { return .idn }
+            if base == "en" { return .en }
+            switch base {
+            case "es": return .es
+            case "fr": return .fr
+            case "de": return .de
+            case "it": return .it
+            case "pt": return .pt
+            case "nl": return .nl
+            case "sv": return .sv
+            case "pl": return .pl
+            case "tr": return .tr
+            case "ru": return .ru
+            case "uk": return .uk
+            case "ar": return .ar
+            case "he": return .he
+            case "hi": return .hi
+            case "th": return .th
+            case "vi": return .vi
+            case "ja": return .ja
+            case "ko": return .ko
+            case "cs": return .cs
+            default: continue
+            }
+        }
+        return .en
+    }
+}
+
+/// Saved appearance + language. Observable, so changing either one updates the whole UI immediately.
+@MainActor @Observable final class Prefs {
+    static let shared = Prefs()
+    var theme: AppTheme { didSet { UserDefaults.standard.set(theme.rawValue, forKey: "gollama.theme") } }
+    var language: AppLanguage { didSet { UserDefaults.standard.set(language.rawValue, forKey: "gollama.language") } }
+    var effectiveLanguage: AppLanguage { language == .system ? AppLanguage.device : language }
+
+    private init() {
+        theme = AppTheme(rawValue: UserDefaults.standard.string(forKey: "gollama.theme") ?? "") ?? .auto
+        language = AppLanguage(rawValue: UserDefaults.standard.string(forKey: "gollama.language") ?? "") ?? .system
+    }
+}
+
+/// Looks a UI string up in the selected language. English text is the key, so anything missing falls back to English.
+@MainActor func tr(_ key: String) -> String {
+    let lang = Prefs.shared.effectiveLanguage
+    if lang == .en { return key }
+    return L10n.tables[lang]?[key] ?? key
+}
+
+struct SettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Bindable private var prefs = Prefs.shared
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    HStack(spacing: 12) {
+                        ForEach(AppTheme.allCases) { option in
+                            let selected = prefs.theme == option
+                            Button {
+                                withAnimation(.smooth(duration: 0.25)) { prefs.theme = option }
+                            } label: {
+                                VStack(spacing: 8) {
+                                    Image(systemName: option.icon).font(.system(size: 24))
+                                    Text(tr(option.titleKey)).font(.footnote.weight(.medium))
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 16)
+                                .foregroundStyle(selected ? Pal.blue : Color.primary)
+                                .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(selected ? Pal.blue.opacity(0.16) : Color.primary.opacity(0.06)))
+                                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(selected ? Pal.blue : Color.clear, lineWidth: 2))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+                } header: {
+                    Text(tr("Appearance"))
+                } footer: {
+                    Text(tr("Auto follows your device's appearance."))
+                }
+
+                Section(tr("Language")) {
+                    ForEach(AppLanguage.allCases) { lang in
+                        Button {
+                            prefs.language = lang
+                        } label: {
+                            HStack {
+                                Text(lang == .system ? tr("System default") : lang.nativeName)
+                                Spacer()
+                                if prefs.language == lang {
+                                    Image(systemName: "checkmark").fontWeight(.semibold).foregroundStyle(Pal.blue)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .navigationTitle(tr("Settings"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) { Button(tr("Done")) { dismiss() } }
+            }
+        }
+    }
+}
+
+/// UI translations, keyed by the English string.
+enum L10n {
+    static let tables: [AppLanguage: [String: String]] = [.es: es, .fr: fr, .de: de, .it: it, .pt: pt, .nl: nl, .sv: sv, .pl: pl, .tr: tr, .ru: ru, .uk: uk, .ar: ar, .he: he, .hi: hi, .th: th, .vi: vi, .idn: idn, .ja: ja, .ko: ko, .zhHans: zhHans, .zhHant: zhHant, .cs: cs]
+
+    static let es: [String: String] = [
+        "Settings": "Ajustes",
+        "Appearance": "Apariencia",
+        "Auto": "Automático",
+        "Light": "Claro",
+        "Dark": "Oscuro",
+        "Auto follows your device's appearance.": "Automático sigue la apariencia de tu dispositivo.",
+        "Language": "Idioma",
+        "System default": "Predeterminado del sistema",
+        "Done": "Listo",
+        "Preview": "Vista previa",
+        "Code": "Código",
+        "View": "Vista",
+        "Writing the interactive block…": "Escribiendo el bloque interactivo…",
+        "HTML Preview": "Vista previa HTML",
+        "Model: %@": "Modelo: %@",
+        "Disconnect": "Desconectar",
+        "Connect to Gollama": "Conectar a Gollama",
+        "Private": "Privada",
+        "Public": "Pública",
+        "Connection": "Conexión",
+        "Same Wi-Fi as your computer": "Misma Wi-Fi que tu ordenador",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "Introduce la IP del ordenador y el puerto del servidor de red de Gollama, o escanea para encontrarlo.",
+        "Scan ports up to": "Escanear puertos hasta",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "No se encontró ningún servidor de Gollama. Comprueba que el servidor esté activo y que ambos dispositivos estén en la misma Wi-Fi.",
+        "Server or tunnel URL": "URL del servidor o túnel",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "Funciona con un servidor Gollama público o un túnel de Cloudflare, por ejemplo https://name.trycloudflare.com.",
+        "Use a port": "Usar un puerto",
+        "Connect": "Conectar",
+        "Stop scanning": "Detener escaneo",
+        "Scan network": "Escanear red",
+        "Gollama Search": "Buscar con Gollama",
+        "Ask AI Mode": "Preguntar al Modo IA",
+        "Recent": "Recientes",
+        "Delete": "Eliminar",
+        "Try": "Prueba",
+        "Copy link": "Copiar enlace",
+        "Showing results for": "Mostrando resultados de",
+        "Search instead for %@": "Buscar en su lugar %@",
+        "AI Overview": "Resumen de IA",
+        "Ask a follow-up": "Haz otra pregunta",
+        "Visit page": "Visitar página",
+        "Share": "Compartir",
+        "History": "Historial",
+        "Search chats": "Buscar chats",
+        "Clear all history": "Borrar todo el historial",
+        "Delete every chat on this device?": "¿Eliminar todos los chats de este dispositivo?",
+        "Delete all": "Eliminar todo",
+        "Ask anything": "Pregunta lo que quieras",
+        "AI Mode searches the web and answers with sources.": "El Modo IA busca en la web y responde con fuentes.",
+        "Message": "Mensaje",
+        "Cancel": "Cancelar",
+        "Submit": "Enviar",
+        "That video isn't on this device anymore.": "Ese vídeo ya no está en este dispositivo.",
+        "Branch in new chat": "Ramificar en un chat nuevo",
+        "Try again without searching": "Reintentar sin buscar",
+        "Copy as Markdown": "Copiar como Markdown",
+        "Copy sources": "Copiar fuentes",
+        "Edit": "Editar",
+        "Copy": "Copiar",
+        "There isn't a result available for this search.": "No hay ningún resultado disponible para esta búsqueda.",
+        "You can still get an answer from the model, but it won't be backed by sources.": "Aún puedes obtener una respuesta del modelo, pero no estará respaldada por fuentes.",
+        "Continue anyway": "Continuar de todos modos",
+        "Photos & Videos": "Fotos y vídeos",
+        "Files": "Archivos",
+        "Model": "Modelo",
+        "Fast": "Rápido",
+        "Pro": "Pro",
+        "Search": "Buscar",
+        "AI Mode": "Modo IA",
+        "Search or ask anything": "Busca o pregunta lo que quieras",
+        "Copied": "Copiado",
+        "Copied as Markdown": "Copiado como Markdown",
+        "Sources copied": "Fuentes copiadas",
+        "Stop": "Detener",
+        "Send": "Enviar",
+        "Wait for the attachment to finish.": "Espera a que termine el adjunto.",
+        "Couldn't read that video.": "No se pudo leer ese vídeo.",
+        "Couldn't read that photo.": "No se pudo leer esa foto.",
+        "%@ isn't a text file.": "%@ no es un archivo de texto."
+    ]
+    static let fr: [String: String] = [
+        "Settings": "Réglages",
+        "Appearance": "Apparence",
+        "Auto": "Auto",
+        "Light": "Clair",
+        "Dark": "Sombre",
+        "Auto follows your device's appearance.": "Auto suit l'apparence de votre appareil.",
+        "Language": "Langue",
+        "System default": "Par défaut du système",
+        "Done": "Terminé",
+        "Preview": "Aperçu",
+        "Code": "Code",
+        "View": "Affichage",
+        "Writing the interactive block…": "Écriture du bloc interactif…",
+        "HTML Preview": "Aperçu HTML",
+        "Model: %@": "Modèle : %@",
+        "Disconnect": "Déconnecter",
+        "Connect to Gollama": "Se connecter à Gollama",
+        "Private": "Privé",
+        "Public": "Public",
+        "Connection": "Connexion",
+        "Same Wi-Fi as your computer": "Même Wi-Fi que votre ordinateur",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "Saisissez l'IP de l'ordinateur et le port du serveur réseau de Gollama, ou lancez une recherche pour le trouver.",
+        "Scan ports up to": "Scanner les ports jusqu'à",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "Aucun serveur Gollama trouvé. Vérifiez que le serveur est activé et que les deux appareils sont sur le même Wi-Fi.",
+        "Server or tunnel URL": "URL du serveur ou du tunnel",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "Fonctionne avec un serveur Gollama public ou un tunnel Cloudflare, par exemple https://name.trycloudflare.com.",
+        "Use a port": "Utiliser un port",
+        "Connect": "Se connecter",
+        "Stop scanning": "Arrêter la recherche",
+        "Scan network": "Analyser le réseau",
+        "Gollama Search": "Recherche Gollama",
+        "Ask AI Mode": "Demander au mode IA",
+        "Recent": "Récentes",
+        "Delete": "Supprimer",
+        "Try": "Essayer",
+        "Copy link": "Copier le lien",
+        "Showing results for": "Résultats affichés pour",
+        "Search instead for %@": "Rechercher plutôt %@",
+        "AI Overview": "Aperçu IA",
+        "Ask a follow-up": "Poser une question complémentaire",
+        "Visit page": "Visiter la page",
+        "Share": "Partager",
+        "History": "Historique",
+        "Search chats": "Rechercher des discussions",
+        "Clear all history": "Effacer tout l'historique",
+        "Delete every chat on this device?": "Supprimer toutes les discussions sur cet appareil ?",
+        "Delete all": "Tout supprimer",
+        "Ask anything": "Posez n'importe quelle question",
+        "AI Mode searches the web and answers with sources.": "Le mode IA effectue des recherches sur le Web et répond en citant ses sources.",
+        "Message": "Message",
+        "Cancel": "Annuler",
+        "Submit": "Envoyer",
+        "That video isn't on this device anymore.": "Cette vidéo n'est plus sur cet appareil.",
+        "Branch in new chat": "Créer une branche dans une nouvelle discussion",
+        "Try again without searching": "Réessayer sans recherche",
+        "Copy as Markdown": "Copier en Markdown",
+        "Copy sources": "Copier les sources",
+        "Edit": "Modifier",
+        "Copy": "Copier",
+        "There isn't a result available for this search.": "Aucun résultat n'est disponible pour cette recherche.",
+        "You can still get an answer from the model, but it won't be backed by sources.": "Vous pouvez quand même obtenir une réponse du modèle, mais elle ne sera pas appuyée par des sources.",
+        "Continue anyway": "Continuer quand même",
+        "Photos & Videos": "Photos et vidéos",
+        "Files": "Fichiers",
+        "Model": "Modèle",
+        "Fast": "Rapide",
+        "Pro": "Pro",
+        "Search": "Recherche",
+        "AI Mode": "Mode IA",
+        "Search or ask anything": "Recherchez ou posez une question",
+        "Copied": "Copié",
+        "Copied as Markdown": "Copié en Markdown",
+        "Sources copied": "Sources copiées",
+        "Stop": "Arrêter",
+        "Send": "Envoyer",
+        "Wait for the attachment to finish.": "Attendez la fin du chargement de la pièce jointe.",
+        "Couldn't read that video.": "Impossible de lire cette vidéo.",
+        "Couldn't read that photo.": "Impossible de lire cette photo.",
+        "%@ isn't a text file.": "%@ n'est pas un fichier texte."
+    ]
+    static let de: [String: String] = [
+        "Settings": "Einstellungen",
+        "Appearance": "Darstellung",
+        "Auto": "Automatisch",
+        "Light": "Hell",
+        "Dark": "Dunkel",
+        "Auto follows your device's appearance.": "Automatisch folgt der Darstellung deines Geräts.",
+        "Language": "Sprache",
+        "System default": "Systemstandard",
+        "Done": "Fertig",
+        "Preview": "Vorschau",
+        "Code": "Code",
+        "View": "Ansicht",
+        "Writing the interactive block…": "Interaktiver Block wird erstellt …",
+        "HTML Preview": "HTML-Vorschau",
+        "Model: %@": "Modell: %@",
+        "Disconnect": "Trennen",
+        "Connect to Gollama": "Mit Gollama verbinden",
+        "Private": "Privat",
+        "Public": "Öffentlich",
+        "Connection": "Verbindung",
+        "Same Wi-Fi as your computer": "Gleiches WLAN wie dein Computer",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "Gib die IP des Computers und den Port des Gollama-Netzwerkservers ein oder suche ihn per Scan.",
+        "Scan ports up to": "Ports scannen bis",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "Kein Gollama-Server gefunden. Prüfe, ob der Server läuft und beide Geräte im selben WLAN sind.",
+        "Server or tunnel URL": "Server- oder Tunnel-URL",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "Funktioniert mit einem öffentlichen Gollama-Server oder einem Cloudflare-Tunnel, z. B. https://name.trycloudflare.com.",
+        "Use a port": "Port verwenden",
+        "Connect": "Verbinden",
+        "Stop scanning": "Scan stoppen",
+        "Scan network": "Netzwerk scannen",
+        "Gollama Search": "Gollama-Suche",
+        "Ask AI Mode": "Im KI-Modus fragen",
+        "Recent": "Zuletzt",
+        "Delete": "Löschen",
+        "Try": "Probier's aus",
+        "Copy link": "Link kopieren",
+        "Showing results for": "Ergebnisse für",
+        "Search instead for %@": "Stattdessen nach %@ suchen",
+        "AI Overview": "KI-Übersicht",
+        "Ask a follow-up": "Folgefrage stellen",
+        "Visit page": "Seite besuchen",
+        "Share": "Teilen",
+        "History": "Verlauf",
+        "Search chats": "Chats durchsuchen",
+        "Clear all history": "Gesamten Verlauf löschen",
+        "Delete every chat on this device?": "Alle Chats auf diesem Gerät löschen?",
+        "Delete all": "Alle löschen",
+        "Ask anything": "Frag einfach",
+        "AI Mode searches the web and answers with sources.": "Der KI-Modus durchsucht das Web und antwortet mit Quellen.",
+        "Message": "Nachricht",
+        "Cancel": "Abbrechen",
+        "Submit": "Senden",
+        "That video isn't on this device anymore.": "Dieses Video ist nicht mehr auf diesem Gerät.",
+        "Branch in new chat": "In neuem Chat verzweigen",
+        "Try again without searching": "Ohne Suche erneut versuchen",
+        "Copy as Markdown": "Als Markdown kopieren",
+        "Copy sources": "Quellen kopieren",
+        "Edit": "Bearbeiten",
+        "Copy": "Kopieren",
+        "There isn't a result available for this search.": "Für diese Suche ist kein Ergebnis verfügbar.",
+        "You can still get an answer from the model, but it won't be backed by sources.": "Du kannst trotzdem eine Antwort vom Modell erhalten, sie ist aber nicht durch Quellen belegt.",
+        "Continue anyway": "Trotzdem fortfahren",
+        "Photos & Videos": "Fotos & Videos",
+        "Files": "Dateien",
+        "Model": "Modell",
+        "Fast": "Schnell",
+        "Pro": "Pro",
+        "Search": "Suche",
+        "AI Mode": "KI-Modus",
+        "Search or ask anything": "Suchen oder etwas fragen",
+        "Copied": "Kopiert",
+        "Copied as Markdown": "Als Markdown kopiert",
+        "Sources copied": "Quellen kopiert",
+        "Stop": "Stopp",
+        "Send": "Senden",
+        "Wait for the attachment to finish.": "Warte, bis der Anhang fertig ist.",
+        "Couldn't read that video.": "Das Video konnte nicht gelesen werden.",
+        "Couldn't read that photo.": "Das Foto konnte nicht gelesen werden.",
+        "%@ isn't a text file.": "%@ ist keine Textdatei."
+    ]
+    static let it: [String: String] = [
+        "Settings": "Impostazioni",
+        "Appearance": "Aspetto",
+        "Auto": "Automatico",
+        "Light": "Chiaro",
+        "Dark": "Scuro",
+        "Auto follows your device's appearance.": "Automatico segue l'aspetto del dispositivo.",
+        "Language": "Lingua",
+        "System default": "Predefinito di sistema",
+        "Done": "Fine",
+        "Preview": "Anteprima",
+        "Code": "Codice",
+        "View": "Vista",
+        "Writing the interactive block…": "Scrittura del blocco interattivo…",
+        "HTML Preview": "Anteprima HTML",
+        "Model: %@": "Modello: %@",
+        "Disconnect": "Disconnetti",
+        "Connect to Gollama": "Connettiti a Gollama",
+        "Private": "Privata",
+        "Public": "Pubblica",
+        "Connection": "Connessione",
+        "Same Wi-Fi as your computer": "Stessa rete Wi-Fi del computer",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "Inserisci l'IP del computer e la porta del server di rete di Gollama, oppure scansiona per trovarlo.",
+        "Scan ports up to": "Scansiona le porte fino a",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "Nessun server Gollama trovato. Verifica che il server sia attivo e che entrambi i dispositivi siano sulla stessa rete Wi-Fi.",
+        "Server or tunnel URL": "URL del server o del tunnel",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "Funziona con un server Gollama pubblico o un tunnel Cloudflare, ad esempio https://name.trycloudflare.com.",
+        "Use a port": "Usa una porta",
+        "Connect": "Connetti",
+        "Stop scanning": "Interrompi scansione",
+        "Scan network": "Scansiona rete",
+        "Gollama Search": "Cerca con Gollama",
+        "Ask AI Mode": "Chiedi alla modalità IA",
+        "Recent": "Recenti",
+        "Delete": "Elimina",
+        "Try": "Prova",
+        "Copy link": "Copia link",
+        "Showing results for": "Risultati per",
+        "Search instead for %@": "Cerca invece %@",
+        "AI Overview": "Panoramica IA",
+        "Ask a follow-up": "Fai una domanda di approfondimento",
+        "Visit page": "Visita la pagina",
+        "Share": "Condividi",
+        "History": "Cronologia",
+        "Search chats": "Cerca nelle chat",
+        "Clear all history": "Cancella tutta la cronologia",
+        "Delete every chat on this device?": "Eliminare tutte le chat su questo dispositivo?",
+        "Delete all": "Elimina tutto",
+        "Ask anything": "Chiedi qualsiasi cosa",
+        "AI Mode searches the web and answers with sources.": "La modalità IA cerca sul web e risponde citando le fonti.",
+        "Message": "Messaggio",
+        "Cancel": "Annulla",
+        "Submit": "Invia",
+        "That video isn't on this device anymore.": "Quel video non è più su questo dispositivo.",
+        "Branch in new chat": "Crea ramo in una nuova chat",
+        "Try again without searching": "Riprova senza cercare",
+        "Copy as Markdown": "Copia come Markdown",
+        "Copy sources": "Copia fonti",
+        "Edit": "Modifica",
+        "Copy": "Copia",
+        "There isn't a result available for this search.": "Non ci sono risultati disponibili per questa ricerca.",
+        "You can still get an answer from the model, but it won't be backed by sources.": "Puoi comunque ottenere una risposta dal modello, ma non sarà supportata da fonti.",
+        "Continue anyway": "Continua comunque",
+        "Photos & Videos": "Foto e video",
+        "Files": "File",
+        "Model": "Modello",
+        "Fast": "Veloce",
+        "Pro": "Pro",
+        "Search": "Cerca",
+        "AI Mode": "Modalità IA",
+        "Search or ask anything": "Cerca o chiedi qualsiasi cosa",
+        "Copied": "Copiato",
+        "Copied as Markdown": "Copiato come Markdown",
+        "Sources copied": "Fonti copiate",
+        "Stop": "Interrompi",
+        "Send": "Invia",
+        "Wait for the attachment to finish.": "Attendi il completamento dell'allegato.",
+        "Couldn't read that video.": "Impossibile leggere quel video.",
+        "Couldn't read that photo.": "Impossibile leggere quella foto.",
+        "%@ isn't a text file.": "%@ non è un file di testo."
+    ]
+    static let pt: [String: String] = [
+        "Settings": "Ajustes",
+        "Appearance": "Aparência",
+        "Auto": "Automático",
+        "Light": "Claro",
+        "Dark": "Escuro",
+        "Auto follows your device's appearance.": "Automático segue a aparência do seu dispositivo.",
+        "Language": "Idioma",
+        "System default": "Padrão do sistema",
+        "Done": "Concluído",
+        "Preview": "Pré-visualização",
+        "Code": "Código",
+        "View": "Vista",
+        "Writing the interactive block…": "Escrevendo o bloco interativo…",
+        "HTML Preview": "Pré-visualização HTML",
+        "Model: %@": "Modelo: %@",
+        "Disconnect": "Desconectar",
+        "Connect to Gollama": "Conectar ao Gollama",
+        "Private": "Privada",
+        "Public": "Pública",
+        "Connection": "Conexão",
+        "Same Wi-Fi as your computer": "Mesmo Wi-Fi do seu computador",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "Insira o IP do computador e a porta do servidor de rede do Gollama, ou faça uma busca para encontrá-lo.",
+        "Scan ports up to": "Verificar portas até",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "Nenhum servidor Gollama encontrado. Verifique se o servidor está ligado e se os dois dispositivos estão no mesmo Wi-Fi.",
+        "Server or tunnel URL": "URL do servidor ou túnel",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "Funciona com um servidor Gollama público ou um túnel Cloudflare, por exemplo https://name.trycloudflare.com.",
+        "Use a port": "Usar uma porta",
+        "Connect": "Conectar",
+        "Stop scanning": "Parar verificação",
+        "Scan network": "Verificar rede",
+        "Gollama Search": "Pesquisa Gollama",
+        "Ask AI Mode": "Perguntar ao Modo IA",
+        "Recent": "Recentes",
+        "Delete": "Excluir",
+        "Try": "Experimente",
+        "Copy link": "Copiar link",
+        "Showing results for": "Mostrando resultados para",
+        "Search instead for %@": "Pesquisar por %@",
+        "AI Overview": "Visão geral por IA",
+        "Ask a follow-up": "Faça uma pergunta de acompanhamento",
+        "Visit page": "Visitar página",
+        "Share": "Compartilhar",
+        "History": "Histórico",
+        "Search chats": "Pesquisar conversas",
+        "Clear all history": "Limpar todo o histórico",
+        "Delete every chat on this device?": "Excluir todas as conversas deste dispositivo?",
+        "Delete all": "Excluir tudo",
+        "Ask anything": "Pergunte qualquer coisa",
+        "AI Mode searches the web and answers with sources.": "O Modo IA pesquisa na web e responde com fontes.",
+        "Message": "Mensagem",
+        "Cancel": "Cancelar",
+        "Submit": "Enviar",
+        "That video isn't on this device anymore.": "Esse vídeo não está mais neste dispositivo.",
+        "Branch in new chat": "Ramificar em nova conversa",
+        "Try again without searching": "Tentar de novo sem pesquisar",
+        "Copy as Markdown": "Copiar como Markdown",
+        "Copy sources": "Copiar fontes",
+        "Edit": "Editar",
+        "Copy": "Copiar",
+        "There isn't a result available for this search.": "Não há resultados disponíveis para esta pesquisa.",
+        "You can still get an answer from the model, but it won't be backed by sources.": "Você ainda pode obter uma resposta do modelo, mas ela não terá fontes.",
+        "Continue anyway": "Continuar mesmo assim",
+        "Photos & Videos": "Fotos e vídeos",
+        "Files": "Arquivos",
+        "Model": "Modelo",
+        "Fast": "Rápido",
+        "Pro": "Pro",
+        "Search": "Pesquisa",
+        "AI Mode": "Modo IA",
+        "Search or ask anything": "Pesquise ou pergunte qualquer coisa",
+        "Copied": "Copiado",
+        "Copied as Markdown": "Copiado como Markdown",
+        "Sources copied": "Fontes copiadas",
+        "Stop": "Parar",
+        "Send": "Enviar",
+        "Wait for the attachment to finish.": "Aguarde o anexo terminar.",
+        "Couldn't read that video.": "Não foi possível ler esse vídeo.",
+        "Couldn't read that photo.": "Não foi possível ler essa foto.",
+        "%@ isn't a text file.": "%@ não é um arquivo de texto."
+    ]
+    static let nl: [String: String] = [
+        "Settings": "Instellingen",
+        "Appearance": "Weergave",
+        "Auto": "Automatisch",
+        "Light": "Licht",
+        "Dark": "Donker",
+        "Auto follows your device's appearance.": "Automatisch volgt de weergave van je apparaat.",
+        "Language": "Taal",
+        "System default": "Systeemstandaard",
+        "Done": "Gereed",
+        "Preview": "Voorbeeld",
+        "Code": "Code",
+        "View": "Weergave",
+        "Writing the interactive block…": "Interactief blok wordt geschreven…",
+        "HTML Preview": "HTML-voorbeeld",
+        "Model: %@": "Model: %@",
+        "Disconnect": "Verbinding verbreken",
+        "Connect to Gollama": "Verbinden met Gollama",
+        "Private": "Privé",
+        "Public": "Openbaar",
+        "Connection": "Verbinding",
+        "Same Wi-Fi as your computer": "Zelfde wifi als je computer",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "Voer het IP-adres van de computer en de poort van Gollama's netwerkserver in, of scan om hem te vinden.",
+        "Scan ports up to": "Poorten scannen tot",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "Geen Gollama-server gevonden. Controleer of de server aanstaat en beide apparaten hetzelfde wifi gebruiken.",
+        "Server or tunnel URL": "Server- of tunnel-URL",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "Werkt met een openbare Gollama-server of een Cloudflare Tunnel, bijvoorbeeld https://name.trycloudflare.com.",
+        "Use a port": "Poort gebruiken",
+        "Connect": "Verbinden",
+        "Stop scanning": "Scannen stoppen",
+        "Scan network": "Netwerk scannen",
+        "Gollama Search": "Gollama zoeken",
+        "Ask AI Mode": "Vraag het AI-modus",
+        "Recent": "Recent",
+        "Delete": "Verwijderen",
+        "Try": "Probeer",
+        "Copy link": "Link kopiëren",
+        "Showing results for": "Resultaten voor",
+        "Search instead for %@": "Zoek in plaats daarvan naar %@",
+        "AI Overview": "AI-overzicht",
+        "Ask a follow-up": "Stel een vervolgvraag",
+        "Visit page": "Pagina bezoeken",
+        "Share": "Delen",
+        "History": "Geschiedenis",
+        "Search chats": "Chats zoeken",
+        "Clear all history": "Alle geschiedenis wissen",
+        "Delete every chat on this device?": "Alle chats op dit apparaat verwijderen?",
+        "Delete all": "Alles verwijderen",
+        "Ask anything": "Vraag maar raak",
+        "AI Mode searches the web and answers with sources.": "AI-modus doorzoekt het web en antwoordt met bronnen.",
+        "Message": "Bericht",
+        "Cancel": "Annuleren",
+        "Submit": "Verzenden",
+        "That video isn't on this device anymore.": "Die video staat niet meer op dit apparaat.",
+        "Branch in new chat": "Vertakken in nieuwe chat",
+        "Try again without searching": "Opnieuw zonder zoeken",
+        "Copy as Markdown": "Kopiëren als Markdown",
+        "Copy sources": "Bronnen kopiëren",
+        "Edit": "Bewerken",
+        "Copy": "Kopiëren",
+        "There isn't a result available for this search.": "Er is geen resultaat beschikbaar voor deze zoekopdracht.",
+        "You can still get an answer from the model, but it won't be backed by sources.": "Je kunt nog steeds een antwoord van het model krijgen, maar zonder bronnen.",
+        "Continue anyway": "Toch doorgaan",
+        "Photos & Videos": "Foto's en video's",
+        "Files": "Bestanden",
+        "Model": "Model",
+        "Fast": "Snel",
+        "Pro": "Pro",
+        "Search": "Zoeken",
+        "AI Mode": "AI-modus",
+        "Search or ask anything": "Zoek of vraag iets",
+        "Copied": "Gekopieerd",
+        "Copied as Markdown": "Gekopieerd als Markdown",
+        "Sources copied": "Bronnen gekopieerd",
+        "Stop": "Stoppen",
+        "Send": "Verstuur",
+        "Wait for the attachment to finish.": "Wacht tot de bijlage klaar is.",
+        "Couldn't read that video.": "Kon die video niet lezen.",
+        "Couldn't read that photo.": "Kon die foto niet lezen.",
+        "%@ isn't a text file.": "%@ is geen tekstbestand."
+    ]
+    static let sv: [String: String] = [
+        "Settings": "Inställningar",
+        "Appearance": "Utseende",
+        "Auto": "Automatiskt",
+        "Light": "Ljust",
+        "Dark": "Mörkt",
+        "Auto follows your device's appearance.": "Automatiskt följer enhetens utseende.",
+        "Language": "Språk",
+        "System default": "Systemstandard",
+        "Done": "Klar",
+        "Preview": "Förhandsgranskning",
+        "Code": "Kod",
+        "View": "Vy",
+        "Writing the interactive block…": "Skriver det interaktiva blocket…",
+        "HTML Preview": "HTML-förhandsgranskning",
+        "Model: %@": "Modell: %@",
+        "Disconnect": "Koppla från",
+        "Connect to Gollama": "Anslut till Gollama",
+        "Private": "Privat",
+        "Public": "Offentlig",
+        "Connection": "Anslutning",
+        "Same Wi-Fi as your computer": "Samma Wi-Fi som din dator",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "Ange datorns IP-adress och porten som Gollamas nätverksserver använder, eller skanna för att hitta den.",
+        "Scan ports up to": "Skanna portar upp till",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "Ingen Gollama-server hittades. Kontrollera att servern är på och att båda enheterna är på samma Wi-Fi.",
+        "Server or tunnel URL": "Server- eller tunnel-URL",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "Fungerar med en offentlig Gollama-server eller en Cloudflare Tunnel, till exempel https://name.trycloudflare.com.",
+        "Use a port": "Använd en port",
+        "Connect": "Anslut",
+        "Stop scanning": "Stoppa skanning",
+        "Scan network": "Skanna nätverk",
+        "Gollama Search": "Gollama-sökning",
+        "Ask AI Mode": "Fråga AI-läget",
+        "Recent": "Senaste",
+        "Delete": "Radera",
+        "Try": "Prova",
+        "Copy link": "Kopiera länk",
+        "Showing results for": "Visar resultat för",
+        "Search instead for %@": "Sök istället efter %@",
+        "AI Overview": "AI-översikt",
+        "Ask a follow-up": "Ställ en följdfråga",
+        "Visit page": "Besök sidan",
+        "Share": "Dela",
+        "History": "Historik",
+        "Search chats": "Sök i chattar",
+        "Clear all history": "Rensa all historik",
+        "Delete every chat on this device?": "Radera alla chattar på den här enheten?",
+        "Delete all": "Radera alla",
+        "Ask anything": "Fråga vad som helst",
+        "AI Mode searches the web and answers with sources.": "AI-läget söker på webben och svarar med källor.",
+        "Message": "Meddelande",
+        "Cancel": "Avbryt",
+        "Submit": "Skicka",
+        "That video isn't on this device anymore.": "Den videon finns inte kvar på den här enheten.",
+        "Branch in new chat": "Förgrena i ny chatt",
+        "Try again without searching": "Försök igen utan sökning",
+        "Copy as Markdown": "Kopiera som Markdown",
+        "Copy sources": "Kopiera källor",
+        "Edit": "Redigera",
+        "Copy": "Kopiera",
+        "There isn't a result available for this search.": "Det finns inget resultat för den här sökningen.",
+        "You can still get an answer from the model, but it won't be backed by sources.": "Du kan ändå få ett svar från modellen, men det saknar källor.",
+        "Continue anyway": "Fortsätt ändå",
+        "Photos & Videos": "Foton och videor",
+        "Files": "Filer",
+        "Model": "Modell",
+        "Fast": "Snabb",
+        "Pro": "Pro",
+        "Search": "Sök",
+        "AI Mode": "AI-läge",
+        "Search or ask anything": "Sök eller fråga vad som helst",
+        "Copied": "Kopierat",
+        "Copied as Markdown": "Kopierat som Markdown",
+        "Sources copied": "Källor kopierade",
+        "Stop": "Stoppa",
+        "Send": "Skicka",
+        "Wait for the attachment to finish.": "Vänta tills bilagan är klar.",
+        "Couldn't read that video.": "Det gick inte att läsa videon.",
+        "Couldn't read that photo.": "Det gick inte att läsa fotot.",
+        "%@ isn't a text file.": "%@ är inte en textfil."
+    ]
+    static let pl: [String: String] = [
+        "Settings": "Ustawienia",
+        "Appearance": "Wygląd",
+        "Auto": "Automatycznie",
+        "Light": "Jasny",
+        "Dark": "Ciemny",
+        "Auto follows your device's appearance.": "Automatycznie dopasowuje się do wyglądu urządzenia.",
+        "Language": "Język",
+        "System default": "Domyślny systemu",
+        "Done": "Gotowe",
+        "Preview": "Podgląd",
+        "Code": "Kod",
+        "View": "Widok",
+        "Writing the interactive block…": "Tworzenie bloku interaktywnego…",
+        "HTML Preview": "Podgląd HTML",
+        "Model: %@": "Model: %@",
+        "Disconnect": "Rozłącz",
+        "Connect to Gollama": "Połącz z Gollama",
+        "Private": "Prywatna",
+        "Public": "Publiczna",
+        "Connection": "Połączenie",
+        "Same Wi-Fi as your computer": "Ta sama sieć Wi-Fi co komputer",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "Wpisz adres IP komputera i port serwera sieciowego Gollama lub przeskanuj sieć, aby go znaleźć.",
+        "Scan ports up to": "Skanuj porty do",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "Nie znaleziono serwera Gollama. Sprawdź, czy serwer jest włączony, a oba urządzenia są w tej samej sieci Wi-Fi.",
+        "Server or tunnel URL": "Adres URL serwera lub tunelu",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "Działa z publicznym serwerem Gollama lub tunelem Cloudflare, na przykład https://name.trycloudflare.com.",
+        "Use a port": "Użyj portu",
+        "Connect": "Połącz",
+        "Stop scanning": "Zatrzymaj skanowanie",
+        "Scan network": "Skanuj sieć",
+        "Gollama Search": "Szukaj w Gollama",
+        "Ask AI Mode": "Zapytaj tryb AI",
+        "Recent": "Ostatnie",
+        "Delete": "Usuń",
+        "Try": "Wypróbuj",
+        "Copy link": "Kopiuj link",
+        "Showing results for": "Wyniki dla",
+        "Search instead for %@": "Szukaj zamiast tego: %@",
+        "AI Overview": "Przegląd AI",
+        "Ask a follow-up": "Zadaj pytanie uzupełniające",
+        "Visit page": "Odwiedź stronę",
+        "Share": "Udostępnij",
+        "History": "Historia",
+        "Search chats": "Szukaj w czatach",
+        "Clear all history": "Wyczyść całą historię",
+        "Delete every chat on this device?": "Usunąć wszystkie czaty z tego urządzenia?",
+        "Delete all": "Usuń wszystko",
+        "Ask anything": "Zapytaj o cokolwiek",
+        "AI Mode searches the web and answers with sources.": "Tryb AI przeszukuje internet i odpowiada ze źródłami.",
+        "Message": "Wiadomość",
+        "Cancel": "Anuluj",
+        "Submit": "Wyślij",
+        "That video isn't on this device anymore.": "Tego filmu nie ma już na tym urządzeniu.",
+        "Branch in new chat": "Rozgałęź w nowym czacie",
+        "Try again without searching": "Spróbuj ponownie bez wyszukiwania",
+        "Copy as Markdown": "Kopiuj jako Markdown",
+        "Copy sources": "Kopiuj źródła",
+        "Edit": "Edytuj",
+        "Copy": "Kopiuj",
+        "There isn't a result available for this search.": "Brak wyników dla tego wyszukiwania.",
+        "You can still get an answer from the model, but it won't be backed by sources.": "Nadal możesz otrzymać odpowiedź od modelu, ale bez źródeł.",
+        "Continue anyway": "Kontynuuj mimo to",
+        "Photos & Videos": "Zdjęcia i filmy",
+        "Files": "Pliki",
+        "Model": "Model",
+        "Fast": "Szybki",
+        "Pro": "Pro",
+        "Search": "Szukaj",
+        "AI Mode": "Tryb AI",
+        "Search or ask anything": "Szukaj lub zapytaj o cokolwiek",
+        "Copied": "Skopiowano",
+        "Copied as Markdown": "Skopiowano jako Markdown",
+        "Sources copied": "Skopiowano źródła",
+        "Stop": "Zatrzymaj",
+        "Send": "Wyślij",
+        "Wait for the attachment to finish.": "Poczekaj na zakończenie przesyłania załącznika.",
+        "Couldn't read that video.": "Nie udało się odczytać tego filmu.",
+        "Couldn't read that photo.": "Nie udało się odczytać tego zdjęcia.",
+        "%@ isn't a text file.": "%@ nie jest plikiem tekstowym."
+    ]
+    static let tr: [String: String] = [
+        "Settings": "Ayarlar",
+        "Appearance": "Görünüm",
+        "Auto": "Otomatik",
+        "Light": "Açık",
+        "Dark": "Koyu",
+        "Auto follows your device's appearance.": "Otomatik, cihazınızın görünümünü takip eder.",
+        "Language": "Dil",
+        "System default": "Sistem varsayılanı",
+        "Done": "Bitti",
+        "Preview": "Önizleme",
+        "Code": "Kod",
+        "View": "Görünüm",
+        "Writing the interactive block…": "Etkileşimli blok yazılıyor…",
+        "HTML Preview": "HTML Önizleme",
+        "Model: %@": "Model: %@",
+        "Disconnect": "Bağlantıyı kes",
+        "Connect to Gollama": "Gollama'ya bağlan",
+        "Private": "Özel",
+        "Public": "Genel",
+        "Connection": "Bağlantı",
+        "Same Wi-Fi as your computer": "Bilgisayarınızla aynı Wi-Fi",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "Bilgisayarın IP adresini ve Gollama ağ sunucusunun kullandığı bağlantı noktasını girin veya bulmak için tarayın.",
+        "Scan ports up to": "Taranacak son bağlantı noktası",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "Gollama sunucusu bulunamadı. Sunucunun açık olduğunu ve iki cihazın aynı Wi-Fi'da olduğunu kontrol edin.",
+        "Server or tunnel URL": "Sunucu veya tünel URL'si",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "Genel bir Gollama sunucusu veya Cloudflare Tunnel ile çalışır, örneğin https://name.trycloudflare.com.",
+        "Use a port": "Bağlantı noktası kullan",
+        "Connect": "Bağlan",
+        "Stop scanning": "Taramayı durdur",
+        "Scan network": "Ağı tara",
+        "Gollama Search": "Gollama Arama",
+        "Ask AI Mode": "AI Modu'na sor",
+        "Recent": "Son",
+        "Delete": "Sil",
+        "Try": "Deneyin",
+        "Copy link": "Bağlantıyı kopyala",
+        "Showing results for": "Şunun için sonuçlar gösteriliyor:",
+        "Search instead for %@": "Bunun yerine şunu ara: %@",
+        "AI Overview": "AI Genel Bakışı",
+        "Ask a follow-up": "Devam sorusu sor",
+        "Visit page": "Sayfayı ziyaret et",
+        "Share": "Paylaş",
+        "History": "Geçmiş",
+        "Search chats": "Sohbetlerde ara",
+        "Clear all history": "Tüm geçmişi temizle",
+        "Delete every chat on this device?": "Bu cihazdaki tüm sohbetler silinsin mi?",
+        "Delete all": "Tümünü sil",
+        "Ask anything": "Her şeyi sorun",
+        "AI Mode searches the web and answers with sources.": "AI Modu web'de arama yapar ve kaynaklarla yanıt verir.",
+        "Message": "Mesaj",
+        "Cancel": "İptal",
+        "Submit": "Gönder",
+        "That video isn't on this device anymore.": "Bu video artık bu cihazda değil.",
+        "Branch in new chat": "Yeni sohbette dallandır",
+        "Try again without searching": "Aramadan tekrar dene",
+        "Copy as Markdown": "Markdown olarak kopyala",
+        "Copy sources": "Kaynakları kopyala",
+        "Edit": "Düzenle",
+        "Copy": "Kopyala",
+        "There isn't a result available for this search.": "Bu arama için sonuç yok.",
+        "You can still get an answer from the model, but it won't be backed by sources.": "Yine de modelden yanıt alabilirsiniz ancak kaynaklarla desteklenmez.",
+        "Continue anyway": "Yine de devam et",
+        "Photos & Videos": "Fotoğraflar ve Videolar",
+        "Files": "Dosyalar",
+        "Model": "Model",
+        "Fast": "Hızlı",
+        "Pro": "Pro",
+        "Search": "Ara",
+        "AI Mode": "AI Modu",
+        "Search or ask anything": "Arayın veya her şeyi sorun",
+        "Copied": "Kopyalandı",
+        "Copied as Markdown": "Markdown olarak kopyalandı",
+        "Sources copied": "Kaynaklar kopyalandı",
+        "Stop": "Durdur",
+        "Send": "Gönder",
+        "Wait for the attachment to finish.": "Ek dosyanın işlenmesinin bitmesini bekleyin.",
+        "Couldn't read that video.": "Video okunamadı.",
+        "Couldn't read that photo.": "Fotoğraf okunamadı.",
+        "%@ isn't a text file.": "%@ bir metin dosyası değil."
+    ]
+    static let ru: [String: String] = [
+        "Settings": "Настройки",
+        "Appearance": "Оформление",
+        "Auto": "Авто",
+        "Light": "Светлая",
+        "Dark": "Тёмная",
+        "Auto follows your device's appearance.": "Авто следует оформлению устройства.",
+        "Language": "Язык",
+        "System default": "Как в системе",
+        "Done": "Готово",
+        "Preview": "Просмотр",
+        "Code": "Код",
+        "View": "Вид",
+        "Writing the interactive block…": "Создаётся интерактивный блок…",
+        "HTML Preview": "Просмотр HTML",
+        "Model: %@": "Модель: %@",
+        "Disconnect": "Отключиться",
+        "Connect to Gollama": "Подключение к Gollama",
+        "Private": "Частная",
+        "Public": "Публичная",
+        "Connection": "Подключение",
+        "Same Wi-Fi as your computer": "Та же сеть Wi-Fi, что и у компьютера",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "Введите IP-адрес компьютера и порт сетевого сервера Gollama или запустите сканирование.",
+        "Scan ports up to": "Сканировать порты до",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "Сервер Gollama не найден. Убедитесь, что сервер включён, а оба устройства подключены к одной сети Wi-Fi.",
+        "Server or tunnel URL": "URL сервера или туннеля",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "Работает с публичным сервером Gollama или туннелем Cloudflare, например https://name.trycloudflare.com.",
+        "Use a port": "Указать порт",
+        "Connect": "Подключиться",
+        "Stop scanning": "Остановить сканирование",
+        "Scan network": "Сканировать сеть",
+        "Gollama Search": "Поиск Gollama",
+        "Ask AI Mode": "Спросить в режиме ИИ",
+        "Recent": "Недавние",
+        "Delete": "Удалить",
+        "Try": "Попробуйте",
+        "Copy link": "Копировать ссылку",
+        "Showing results for": "Показаны результаты по запросу",
+        "Search instead for %@": "Искать вместо этого: %@",
+        "AI Overview": "Обзор от ИИ",
+        "Ask a follow-up": "Задать уточняющий вопрос",
+        "Visit page": "Открыть страницу",
+        "Share": "Поделиться",
+        "History": "История",
+        "Search chats": "Поиск по чатам",
+        "Clear all history": "Очистить всю историю",
+        "Delete every chat on this device?": "Удалить все чаты на этом устройстве?",
+        "Delete all": "Удалить все",
+        "Ask anything": "Спрашивайте что угодно",
+        "AI Mode searches the web and answers with sources.": "Режим ИИ ищет в интернете и отвечает со ссылками на источники.",
+        "Message": "Сообщение",
+        "Cancel": "Отмена",
+        "Submit": "Отправить",
+        "That video isn't on this device anymore.": "Этого видео больше нет на устройстве.",
+        "Branch in new chat": "Ответвить в новый чат",
+        "Try again without searching": "Повторить без поиска",
+        "Copy as Markdown": "Копировать как Markdown",
+        "Copy sources": "Копировать источники",
+        "Edit": "Изменить",
+        "Copy": "Копировать",
+        "There isn't a result available for this search.": "По этому запросу нет результатов.",
+        "You can still get an answer from the model, but it won't be backed by sources.": "Вы всё равно можете получить ответ модели, но без источников.",
+        "Continue anyway": "Всё равно продолжить",
+        "Photos & Videos": "Фото и видео",
+        "Files": "Файлы",
+        "Model": "Модель",
+        "Fast": "Быстрая",
+        "Pro": "Pro",
+        "Search": "Поиск",
+        "AI Mode": "Режим ИИ",
+        "Search or ask anything": "Введите запрос или вопрос",
+        "Copied": "Скопировано",
+        "Copied as Markdown": "Скопировано как Markdown",
+        "Sources copied": "Источники скопированы",
+        "Stop": "Остановить",
+        "Send": "Отправить",
+        "Wait for the attachment to finish.": "Дождитесь завершения загрузки вложения.",
+        "Couldn't read that video.": "Не удалось прочитать видео.",
+        "Couldn't read that photo.": "Не удалось прочитать фото.",
+        "%@ isn't a text file.": "%@ не является текстовым файлом."
+    ]
+    static let uk: [String: String] = [
+        "Settings": "Налаштування",
+        "Appearance": "Вигляд",
+        "Auto": "Авто",
+        "Light": "Світла",
+        "Dark": "Темна",
+        "Auto follows your device's appearance.": "Авто відповідає вигляду пристрою.",
+        "Language": "Мова",
+        "System default": "Як у системі",
+        "Done": "Готово",
+        "Preview": "Перегляд",
+        "Code": "Код",
+        "View": "Вигляд",
+        "Writing the interactive block…": "Створюється інтерактивний блок…",
+        "HTML Preview": "Перегляд HTML",
+        "Model: %@": "Модель: %@",
+        "Disconnect": "Від’єднатися",
+        "Connect to Gollama": "Підключення до Gollama",
+        "Private": "Приватна",
+        "Public": "Публічна",
+        "Connection": "Підключення",
+        "Same Wi-Fi as your computer": "Та сама мережа Wi-Fi, що й комп’ютер",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "Введіть IP-адресу комп’ютера та порт мережевого сервера Gollama або скористайтеся скануванням.",
+        "Scan ports up to": "Сканувати порти до",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "Сервер Gollama не знайдено. Переконайтеся, що сервер увімкнено, а обидва пристрої в одній мережі Wi-Fi.",
+        "Server or tunnel URL": "URL сервера або тунелю",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "Працює з публічним сервером Gollama або тунелем Cloudflare, наприклад https://name.trycloudflare.com.",
+        "Use a port": "Вказати порт",
+        "Connect": "Підключитися",
+        "Stop scanning": "Зупинити сканування",
+        "Scan network": "Сканувати мережу",
+        "Gollama Search": "Пошук Gollama",
+        "Ask AI Mode": "Запитати в режимі ШІ",
+        "Recent": "Нещодавні",
+        "Delete": "Видалити",
+        "Try": "Спробуйте",
+        "Copy link": "Копіювати посилання",
+        "Showing results for": "Показано результати для",
+        "Search instead for %@": "Шукати натомість: %@",
+        "AI Overview": "Огляд від ШІ",
+        "Ask a follow-up": "Поставити уточнювальне запитання",
+        "Visit page": "Відкрити сторінку",
+        "Share": "Поділитися",
+        "History": "Історія",
+        "Search chats": "Пошук у чатах",
+        "Clear all history": "Очистити всю історію",
+        "Delete every chat on this device?": "Видалити всі чати на цьому пристрої?",
+        "Delete all": "Видалити все",
+        "Ask anything": "Запитуйте будь-що",
+        "AI Mode searches the web and answers with sources.": "Режим ШІ шукає в інтернеті й відповідає з посиланнями на джерела.",
+        "Message": "Повідомлення",
+        "Cancel": "Скасувати",
+        "Submit": "Надіслати",
+        "That video isn't on this device anymore.": "Цього відео більше немає на пристрої.",
+        "Branch in new chat": "Відгалузити в новий чат",
+        "Try again without searching": "Повторити без пошуку",
+        "Copy as Markdown": "Копіювати як Markdown",
+        "Copy sources": "Копіювати джерела",
+        "Edit": "Редагувати",
+        "Copy": "Копіювати",
+        "There isn't a result available for this search.": "За цим запитом немає результатів.",
+        "You can still get an answer from the model, but it won't be backed by sources.": "Ви все одно можете отримати відповідь моделі, але без джерел.",
+        "Continue anyway": "Все одно продовжити",
+        "Photos & Videos": "Фото та відео",
+        "Files": "Файли",
+        "Model": "Модель",
+        "Fast": "Швидка",
+        "Pro": "Pro",
+        "Search": "Пошук",
+        "AI Mode": "Режим ШІ",
+        "Search or ask anything": "Введіть запит або запитання",
+        "Copied": "Скопійовано",
+        "Copied as Markdown": "Скопійовано як Markdown",
+        "Sources copied": "Джерела скопійовано",
+        "Stop": "Зупинити",
+        "Send": "Надіслати",
+        "Wait for the attachment to finish.": "Дочекайтеся завершення завантаження вкладення.",
+        "Couldn't read that video.": "Не вдалося прочитати відео.",
+        "Couldn't read that photo.": "Не вдалося прочитати фото.",
+        "%@ isn't a text file.": "%@ не є текстовим файлом."
+    ]
+    static let ar: [String: String] = [
+        "Settings": "الإعدادات",
+        "Appearance": "المظهر",
+        "Auto": "تلقائي",
+        "Light": "فاتح",
+        "Dark": "داكن",
+        "Auto follows your device's appearance.": "الوضع التلقائي يتبع مظهر جهازك.",
+        "Language": "اللغة",
+        "System default": "افتراضي النظام",
+        "Done": "تم",
+        "Preview": "معاينة",
+        "Code": "الشيفرة",
+        "View": "عرض",
+        "Writing the interactive block…": "جارٍ كتابة الكتلة التفاعلية…",
+        "HTML Preview": "معاينة HTML",
+        "Model: %@": "النموذج: %@",
+        "Disconnect": "قطع الاتصال",
+        "Connect to Gollama": "الاتصال بـ Gollama",
+        "Private": "خاصة",
+        "Public": "عامة",
+        "Connection": "الاتصال",
+        "Same Wi-Fi as your computer": "نفس شبكة Wi-Fi للكمبيوتر",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "أدخل عنوان IP للكمبيوتر والمنفذ الذي يستخدمه خادم الشبكة في Gollama، أو امسح الشبكة للعثور عليه.",
+        "Scan ports up to": "فحص المنافذ حتى",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "لم يتم العثور على خادم Gollama. تأكد من تشغيل الخادم ومن اتصال الجهازين بنفس شبكة Wi-Fi.",
+        "Server or tunnel URL": "عنوان URL للخادم أو النفق",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "يعمل مع خادم Gollama عام أو نفق Cloudflare، مثل https://name.trycloudflare.com.",
+        "Use a port": "استخدام منفذ",
+        "Connect": "اتصال",
+        "Stop scanning": "إيقاف الفحص",
+        "Scan network": "فحص الشبكة",
+        "Gollama Search": "بحث Gollama",
+        "Ask AI Mode": "اسأل وضع الذكاء الاصطناعي",
+        "Recent": "الأخيرة",
+        "Delete": "حذف",
+        "Try": "جرّب",
+        "Copy link": "نسخ الرابط",
+        "Showing results for": "عرض النتائج لـ",
+        "Search instead for %@": "البحث عن %@ بدلاً من ذلك",
+        "AI Overview": "نظرة عامة بالذكاء الاصطناعي",
+        "Ask a follow-up": "اطرح سؤالاً متابعاً",
+        "Visit page": "زيارة الصفحة",
+        "Share": "مشاركة",
+        "History": "السجل",
+        "Search chats": "البحث في المحادثات",
+        "Clear all history": "مسح كل السجل",
+        "Delete every chat on this device?": "هل تريد حذف كل المحادثات على هذا الجهاز؟",
+        "Delete all": "حذف الكل",
+        "Ask anything": "اسأل أي شيء",
+        "AI Mode searches the web and answers with sources.": "يبحث وضع الذكاء الاصطناعي في الويب ويجيب مع المصادر.",
+        "Message": "رسالة",
+        "Cancel": "إلغاء",
+        "Submit": "إرسال",
+        "That video isn't on this device anymore.": "لم يعد هذا الفيديو موجوداً على هذا الجهاز.",
+        "Branch in new chat": "تفريع في محادثة جديدة",
+        "Try again without searching": "إعادة المحاولة دون بحث",
+        "Copy as Markdown": "نسخ بصيغة Markdown",
+        "Copy sources": "نسخ المصادر",
+        "Edit": "تعديل",
+        "Copy": "نسخ",
+        "There isn't a result available for this search.": "لا توجد نتيجة متاحة لهذا البحث.",
+        "You can still get an answer from the model, but it won't be backed by sources.": "لا يزال بإمكانك الحصول على إجابة من النموذج، لكنها لن تستند إلى مصادر.",
+        "Continue anyway": "المتابعة على أي حال",
+        "Photos & Videos": "الصور والفيديوهات",
+        "Files": "الملفات",
+        "Model": "النموذج",
+        "Fast": "سريع",
+        "Pro": "احترافي",
+        "Search": "بحث",
+        "AI Mode": "وضع الذكاء الاصطناعي",
+        "Search or ask anything": "ابحث أو اسأل أي شيء",
+        "Copied": "تم النسخ",
+        "Copied as Markdown": "تم النسخ بصيغة Markdown",
+        "Sources copied": "تم نسخ المصادر",
+        "Stop": "إيقاف",
+        "Send": "إرسال",
+        "Wait for the attachment to finish.": "انتظر حتى يكتمل المرفق.",
+        "Couldn't read that video.": "تعذّرت قراءة هذا الفيديو.",
+        "Couldn't read that photo.": "تعذّرت قراءة هذه الصورة.",
+        "%@ isn't a text file.": "%@ ليس ملفاً نصياً."
+    ]
+    static let he: [String: String] = [
+        "Settings": "הגדרות",
+        "Appearance": "מראה",
+        "Auto": "אוטומטי",
+        "Light": "בהיר",
+        "Dark": "כהה",
+        "Auto follows your device's appearance.": "אוטומטי עוקב אחר מראה המכשיר.",
+        "Language": "שפה",
+        "System default": "ברירת מחדל של המערכת",
+        "Done": "סיום",
+        "Preview": "תצוגה מקדימה",
+        "Code": "קוד",
+        "View": "תצוגה",
+        "Writing the interactive block…": "כותב את הבלוק האינטראקטיבי…",
+        "HTML Preview": "תצוגת HTML מקדימה",
+        "Model: %@": "מודל: %@",
+        "Disconnect": "התנתק",
+        "Connect to Gollama": "התחברות ל-Gollama",
+        "Private": "פרטית",
+        "Public": "ציבורית",
+        "Connection": "חיבור",
+        "Same Wi-Fi as your computer": "אותה רשת Wi-Fi כמו המחשב",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "הזינו את כתובת ה-IP של המחשב ואת היציאה שבה שרת הרשת של Gollama משתמש, או סרקו כדי למצוא אותו.",
+        "Scan ports up to": "סרוק יציאות עד",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "לא נמצא שרת Gollama. ודאו שהשרת פועל ושני המכשירים מחוברים לאותה רשת Wi-Fi.",
+        "Server or tunnel URL": "כתובת URL של שרת או מנהרה",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "עובד עם שרת Gollama ציבורי או מנהרת Cloudflare, למשל https://name.trycloudflare.com.",
+        "Use a port": "שימוש ביציאה",
+        "Connect": "התחבר",
+        "Stop scanning": "עצור סריקה",
+        "Scan network": "סרוק רשת",
+        "Gollama Search": "חיפוש Gollama",
+        "Ask AI Mode": "שאל את מצב AI",
+        "Recent": "אחרונים",
+        "Delete": "מחק",
+        "Try": "נסו",
+        "Copy link": "העתק קישור",
+        "Showing results for": "מציג תוצאות עבור",
+        "Search instead for %@": "חפש במקום זאת %@",
+        "AI Overview": "סקירת AI",
+        "Ask a follow-up": "שאל שאלת המשך",
+        "Visit page": "בקר בדף",
+        "Share": "שתף",
+        "History": "היסטוריה",
+        "Search chats": "חפש בצ'אטים",
+        "Clear all history": "נקה את כל ההיסטוריה",
+        "Delete every chat on this device?": "למחוק את כל הצ'אטים במכשיר זה?",
+        "Delete all": "מחק הכל",
+        "Ask anything": "שאל כל דבר",
+        "AI Mode searches the web and answers with sources.": "מצב AI מחפש ברשת ועונה עם מקורות.",
+        "Message": "הודעה",
+        "Cancel": "ביטול",
+        "Submit": "שלח",
+        "That video isn't on this device anymore.": "הסרטון הזה כבר לא נמצא במכשיר.",
+        "Branch in new chat": "הסתעף בצ'אט חדש",
+        "Try again without searching": "נסה שוב בלי חיפוש",
+        "Copy as Markdown": "העתק כ-Markdown",
+        "Copy sources": "העתק מקורות",
+        "Edit": "ערוך",
+        "Copy": "העתק",
+        "There isn't a result available for this search.": "אין תוצאה זמינה עבור החיפוש הזה.",
+        "You can still get an answer from the model, but it won't be backed by sources.": "עדיין אפשר לקבל תשובה מהמודל, אך היא לא תתבסס על מקורות.",
+        "Continue anyway": "המשך בכל זאת",
+        "Photos & Videos": "תמונות וסרטונים",
+        "Files": "קבצים",
+        "Model": "מודל",
+        "Fast": "מהיר",
+        "Pro": "Pro",
+        "Search": "חיפוש",
+        "AI Mode": "מצב AI",
+        "Search or ask anything": "חפש או שאל כל דבר",
+        "Copied": "הועתק",
+        "Copied as Markdown": "הועתק כ-Markdown",
+        "Sources copied": "המקורות הועתקו",
+        "Stop": "עצור",
+        "Send": "שלח",
+        "Wait for the attachment to finish.": "המתן לסיום טעינת הקובץ המצורף.",
+        "Couldn't read that video.": "לא ניתן לקרוא את הסרטון.",
+        "Couldn't read that photo.": "לא ניתן לקרוא את התמונה.",
+        "%@ isn't a text file.": "%@ אינו קובץ טקסט."
+    ]
+    static let hi: [String: String] = [
+        "Settings": "सेटिंग्स",
+        "Appearance": "दिखावट",
+        "Auto": "स्वचालित",
+        "Light": "लाइट",
+        "Dark": "डार्क",
+        "Auto follows your device's appearance.": "स्वचालित आपके डिवाइस के अनुसार चलता है।",
+        "Language": "भाषा",
+        "System default": "सिस्टम डिफ़ॉल्ट",
+        "Done": "पूर्ण",
+        "Preview": "पूर्वावलोकन",
+        "Code": "कोड",
+        "View": "दृश्य",
+        "Writing the interactive block…": "इंटरैक्टिव ब्लॉक लिखा जा रहा है…",
+        "HTML Preview": "HTML पूर्वावलोकन",
+        "Model: %@": "मॉडल: %@",
+        "Disconnect": "डिस्कनेक्ट करें",
+        "Connect to Gollama": "Gollama से कनेक्ट करें",
+        "Private": "निजी",
+        "Public": "सार्वजनिक",
+        "Connection": "कनेक्शन",
+        "Same Wi-Fi as your computer": "आपके कंप्यूटर वाला ही Wi-Fi",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "कंप्यूटर का IP और Gollama के नेटवर्क सर्वर का पोर्ट दर्ज करें, या खोजने के लिए स्कैन करें।",
+        "Scan ports up to": "पोर्ट स्कैन करें, अधिकतम",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "कोई Gollama सर्वर नहीं मिला। जाँचें कि सर्वर चालू है और दोनों डिवाइस एक ही Wi-Fi पर हैं।",
+        "Server or tunnel URL": "सर्वर या टनल URL",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "सार्वजनिक Gollama सर्वर या Cloudflare Tunnel के साथ काम करता है, जैसे https://name.trycloudflare.com।",
+        "Use a port": "पोर्ट का उपयोग करें",
+        "Connect": "कनेक्ट करें",
+        "Stop scanning": "स्कैन रोकें",
+        "Scan network": "नेटवर्क स्कैन करें",
+        "Gollama Search": "Gollama खोज",
+        "Ask AI Mode": "AI मोड से पूछें",
+        "Recent": "हाल के",
+        "Delete": "हटाएं",
+        "Try": "आज़माएं",
+        "Copy link": "लिंक कॉपी करें",
+        "Showing results for": "इसके परिणाम दिखाए जा रहे हैं:",
+        "Search instead for %@": "इसके बजाय %@ खोजें",
+        "AI Overview": "AI ओवरव्यू",
+        "Ask a follow-up": "अगला सवाल पूछें",
+        "Visit page": "पेज पर जाएं",
+        "Share": "साझा करें",
+        "History": "इतिहास",
+        "Search chats": "चैट खोजें",
+        "Clear all history": "पूरा इतिहास साफ़ करें",
+        "Delete every chat on this device?": "इस डिवाइस की सभी चैट हटाएं?",
+        "Delete all": "सब हटाएं",
+        "Ask anything": "कुछ भी पूछें",
+        "AI Mode searches the web and answers with sources.": "AI मोड वेब खोजता है और स्रोतों के साथ जवाब देता है।",
+        "Message": "संदेश",
+        "Cancel": "रद्द करें",
+        "Submit": "सबमिट करें",
+        "That video isn't on this device anymore.": "यह वीडियो अब इस डिवाइस पर नहीं है।",
+        "Branch in new chat": "नई चैट में शाखा बनाएं",
+        "Try again without searching": "बिना खोज के फिर कोशिश करें",
+        "Copy as Markdown": "Markdown के रूप में कॉपी करें",
+        "Copy sources": "स्रोत कॉपी करें",
+        "Edit": "संपादित करें",
+        "Copy": "कॉपी करें",
+        "There isn't a result available for this search.": "इस खोज के लिए कोई परिणाम उपलब्ध नहीं है।",
+        "You can still get an answer from the model, but it won't be backed by sources.": "आप अब भी मॉडल से उत्तर पा सकते हैं, लेकिन वह स्रोतों पर आधारित नहीं होगा।",
+        "Continue anyway": "फिर भी जारी रखें",
+        "Photos & Videos": "फ़ोटो और वीडियो",
+        "Files": "फ़ाइलें",
+        "Model": "मॉडल",
+        "Fast": "तेज़",
+        "Pro": "प्रो",
+        "Search": "खोज",
+        "AI Mode": "AI मोड",
+        "Search or ask anything": "खोजें या कुछ भी पूछें",
+        "Copied": "कॉपी किया गया",
+        "Copied as Markdown": "Markdown के रूप में कॉपी किया गया",
+        "Sources copied": "स्रोत कॉपी किए गए",
+        "Stop": "रोकें",
+        "Send": "भेजें",
+        "Wait for the attachment to finish.": "अटैचमेंट पूरा होने तक प्रतीक्षा करें।",
+        "Couldn't read that video.": "वह वीडियो पढ़ा नहीं जा सका।",
+        "Couldn't read that photo.": "वह फ़ोटो पढ़ी नहीं जा सकी।",
+        "%@ isn't a text file.": "%@ टेक्स्ट फ़ाइल नहीं है।"
+    ]
+    static let th: [String: String] = [
+        "Settings": "การตั้งค่า",
+        "Appearance": "รูปลักษณ์",
+        "Auto": "อัตโนมัติ",
+        "Light": "สว่าง",
+        "Dark": "มืด",
+        "Auto follows your device's appearance.": "อัตโนมัติจะตามรูปลักษณ์ของอุปกรณ์",
+        "Language": "ภาษา",
+        "System default": "ค่าเริ่มต้นของระบบ",
+        "Done": "เสร็จสิ้น",
+        "Preview": "ตัวอย่าง",
+        "Code": "โค้ด",
+        "View": "มุมมอง",
+        "Writing the interactive block…": "กำลังเขียนบล็อกแบบโต้ตอบ…",
+        "HTML Preview": "ตัวอย่าง HTML",
+        "Model: %@": "โมเดล: %@",
+        "Disconnect": "ตัดการเชื่อมต่อ",
+        "Connect to Gollama": "เชื่อมต่อกับ Gollama",
+        "Private": "ส่วนตัว",
+        "Public": "สาธารณะ",
+        "Connection": "การเชื่อมต่อ",
+        "Same Wi-Fi as your computer": "Wi-Fi เดียวกับคอมพิวเตอร์",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "ป้อน IP ของคอมพิวเตอร์และพอร์ตที่เซิร์ฟเวอร์เครือข่ายของ Gollama ใช้ หรือสแกนเพื่อค้นหา",
+        "Scan ports up to": "สแกนพอร์ตถึง",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "ไม่พบเซิร์ฟเวอร์ Gollama ตรวจสอบว่าเซิร์ฟเวอร์เปิดอยู่และทั้งสองอุปกรณ์ใช้ Wi-Fi เดียวกัน",
+        "Server or tunnel URL": "URL เซิร์ฟเวอร์หรืออุโมงค์",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "ใช้ได้กับเซิร์ฟเวอร์ Gollama สาธารณะหรือ Cloudflare Tunnel เช่น https://name.trycloudflare.com",
+        "Use a port": "ใช้พอร์ต",
+        "Connect": "เชื่อมต่อ",
+        "Stop scanning": "หยุดสแกน",
+        "Scan network": "สแกนเครือข่าย",
+        "Gollama Search": "ค้นหาด้วย Gollama",
+        "Ask AI Mode": "ถามโหมด AI",
+        "Recent": "ล่าสุด",
+        "Delete": "ลบ",
+        "Try": "ลองดู",
+        "Copy link": "คัดลอกลิงก์",
+        "Showing results for": "แสดงผลลัพธ์สำหรับ",
+        "Search instead for %@": "ค้นหา %@ แทน",
+        "AI Overview": "ภาพรวมจาก AI",
+        "Ask a follow-up": "ถามต่อ",
+        "Visit page": "เยี่ยมชมหน้า",
+        "Share": "แชร์",
+        "History": "ประวัติ",
+        "Search chats": "ค้นหาแชต",
+        "Clear all history": "ล้างประวัติทั้งหมด",
+        "Delete every chat on this device?": "ลบแชตทั้งหมดในอุปกรณ์นี้หรือไม่",
+        "Delete all": "ลบทั้งหมด",
+        "Ask anything": "ถามได้ทุกเรื่อง",
+        "AI Mode searches the web and answers with sources.": "โหมด AI ค้นหาในเว็บและตอบพร้อมแหล่งที่มา",
+        "Message": "ข้อความ",
+        "Cancel": "ยกเลิก",
+        "Submit": "ส่ง",
+        "That video isn't on this device anymore.": "วิดีโอนั้นไม่อยู่ในอุปกรณ์นี้อีกต่อไป",
+        "Branch in new chat": "แตกแขนงเป็นแชตใหม่",
+        "Try again without searching": "ลองอีกครั้งโดยไม่ค้นหา",
+        "Copy as Markdown": "คัดลอกเป็น Markdown",
+        "Copy sources": "คัดลอกแหล่งที่มา",
+        "Edit": "แก้ไข",
+        "Copy": "คัดลอก",
+        "There isn't a result available for this search.": "ไม่มีผลลัพธ์สำหรับการค้นหานี้",
+        "You can still get an answer from the model, but it won't be backed by sources.": "คุณยังรับคำตอบจากโมเดลได้ แต่จะไม่มีแหล่งที่มาสนับสนุน",
+        "Continue anyway": "ดำเนินการต่อ",
+        "Photos & Videos": "รูปภาพและวิดีโอ",
+        "Files": "ไฟล์",
+        "Model": "โมเดล",
+        "Fast": "เร็ว",
+        "Pro": "โปร",
+        "Search": "ค้นหา",
+        "AI Mode": "โหมด AI",
+        "Search or ask anything": "ค้นหาหรือถามได้ทุกเรื่อง",
+        "Copied": "คัดลอกแล้ว",
+        "Copied as Markdown": "คัดลอกเป็น Markdown แล้ว",
+        "Sources copied": "คัดลอกแหล่งที่มาแล้ว",
+        "Stop": "หยุด",
+        "Send": "ส่ง",
+        "Wait for the attachment to finish.": "รอให้ไฟล์แนบเสร็จก่อน",
+        "Couldn't read that video.": "ไม่สามารถอ่านวิดีโอนั้นได้",
+        "Couldn't read that photo.": "ไม่สามารถอ่านรูปภาพนั้นได้",
+        "%@ isn't a text file.": "%@ ไม่ใช่ไฟล์ข้อความ"
+    ]
+    static let vi: [String: String] = [
+        "Settings": "Cài đặt",
+        "Appearance": "Giao diện",
+        "Auto": "Tự động",
+        "Light": "Sáng",
+        "Dark": "Tối",
+        "Auto follows your device's appearance.": "Tự động theo giao diện của thiết bị.",
+        "Language": "Ngôn ngữ",
+        "System default": "Mặc định hệ thống",
+        "Done": "Xong",
+        "Preview": "Xem trước",
+        "Code": "Mã",
+        "View": "Xem",
+        "Writing the interactive block…": "Đang viết khối tương tác…",
+        "HTML Preview": "Xem trước HTML",
+        "Model: %@": "Mô hình: %@",
+        "Disconnect": "Ngắt kết nối",
+        "Connect to Gollama": "Kết nối với Gollama",
+        "Private": "Riêng tư",
+        "Public": "Công khai",
+        "Connection": "Kết nối",
+        "Same Wi-Fi as your computer": "Cùng Wi-Fi với máy tính",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "Nhập IP của máy tính và cổng mà máy chủ mạng của Gollama sử dụng, hoặc quét để tìm.",
+        "Scan ports up to": "Quét cổng đến",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "Không tìm thấy máy chủ Gollama. Hãy kiểm tra máy chủ đã bật và cả hai thiết bị dùng chung Wi-Fi.",
+        "Server or tunnel URL": "URL máy chủ hoặc đường hầm",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "Hoạt động với máy chủ Gollama công khai hoặc Cloudflare Tunnel, ví dụ https://name.trycloudflare.com.",
+        "Use a port": "Dùng cổng",
+        "Connect": "Kết nối",
+        "Stop scanning": "Dừng quét",
+        "Scan network": "Quét mạng",
+        "Gollama Search": "Tìm với Gollama",
+        "Ask AI Mode": "Hỏi Chế độ AI",
+        "Recent": "Gần đây",
+        "Delete": "Xóa",
+        "Try": "Thử",
+        "Copy link": "Sao chép liên kết",
+        "Showing results for": "Hiển thị kết quả cho",
+        "Search instead for %@": "Tìm kiếm %@ thay thế",
+        "AI Overview": "Tổng quan từ AI",
+        "Ask a follow-up": "Đặt câu hỏi tiếp theo",
+        "Visit page": "Truy cập trang",
+        "Share": "Chia sẻ",
+        "History": "Lịch sử",
+        "Search chats": "Tìm kiếm trò chuyện",
+        "Clear all history": "Xóa toàn bộ lịch sử",
+        "Delete every chat on this device?": "Xóa mọi cuộc trò chuyện trên thiết bị này?",
+        "Delete all": "Xóa tất cả",
+        "Ask anything": "Hỏi bất cứ điều gì",
+        "AI Mode searches the web and answers with sources.": "Chế độ AI tìm kiếm trên web và trả lời kèm nguồn.",
+        "Message": "Tin nhắn",
+        "Cancel": "Hủy",
+        "Submit": "Gửi",
+        "That video isn't on this device anymore.": "Video đó không còn trên thiết bị này.",
+        "Branch in new chat": "Tách sang cuộc trò chuyện mới",
+        "Try again without searching": "Thử lại không tìm kiếm",
+        "Copy as Markdown": "Sao chép dạng Markdown",
+        "Copy sources": "Sao chép nguồn",
+        "Edit": "Chỉnh sửa",
+        "Copy": "Sao chép",
+        "There isn't a result available for this search.": "Không có kết quả nào cho tìm kiếm này.",
+        "You can still get an answer from the model, but it won't be backed by sources.": "Bạn vẫn có thể nhận câu trả lời từ mô hình, nhưng sẽ không có nguồn dẫn chứng.",
+        "Continue anyway": "Vẫn tiếp tục",
+        "Photos & Videos": "Ảnh và video",
+        "Files": "Tệp",
+        "Model": "Mô hình",
+        "Fast": "Nhanh",
+        "Pro": "Pro",
+        "Search": "Tìm kiếm",
+        "AI Mode": "Chế độ AI",
+        "Search or ask anything": "Tìm kiếm hoặc hỏi bất cứ điều gì",
+        "Copied": "Đã sao chép",
+        "Copied as Markdown": "Đã sao chép dạng Markdown",
+        "Sources copied": "Đã sao chép nguồn",
+        "Stop": "Dừng",
+        "Send": "Gửi",
+        "Wait for the attachment to finish.": "Hãy đợi tệp đính kèm xử lý xong.",
+        "Couldn't read that video.": "Không thể đọc video đó.",
+        "Couldn't read that photo.": "Không thể đọc ảnh đó.",
+        "%@ isn't a text file.": "%@ không phải là tệp văn bản."
+    ]
+    static let idn: [String: String] = [
+        "Settings": "Pengaturan",
+        "Appearance": "Tampilan",
+        "Auto": "Otomatis",
+        "Light": "Terang",
+        "Dark": "Gelap",
+        "Auto follows your device's appearance.": "Otomatis mengikuti tampilan perangkat Anda.",
+        "Language": "Bahasa",
+        "System default": "Default sistem",
+        "Done": "Selesai",
+        "Preview": "Pratinjau",
+        "Code": "Kode",
+        "View": "Tampilan",
+        "Writing the interactive block…": "Menulis blok interaktif…",
+        "HTML Preview": "Pratinjau HTML",
+        "Model: %@": "Model: %@",
+        "Disconnect": "Putuskan",
+        "Connect to Gollama": "Hubungkan ke Gollama",
+        "Private": "Pribadi",
+        "Public": "Publik",
+        "Connection": "Koneksi",
+        "Same Wi-Fi as your computer": "Wi-Fi yang sama dengan komputer",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "Masukkan IP komputer dan port yang digunakan server jaringan Gollama, atau pindai untuk menemukannya.",
+        "Scan ports up to": "Pindai port hingga",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "Server Gollama tidak ditemukan. Pastikan server menyala dan kedua perangkat memakai Wi-Fi yang sama.",
+        "Server or tunnel URL": "URL server atau tunnel",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "Berfungsi dengan server Gollama publik atau Cloudflare Tunnel, misalnya https://name.trycloudflare.com.",
+        "Use a port": "Gunakan port",
+        "Connect": "Hubungkan",
+        "Stop scanning": "Hentikan pemindaian",
+        "Scan network": "Pindai jaringan",
+        "Gollama Search": "Cari dengan Gollama",
+        "Ask AI Mode": "Tanya Mode AI",
+        "Recent": "Terbaru",
+        "Delete": "Hapus",
+        "Try": "Coba",
+        "Copy link": "Salin tautan",
+        "Showing results for": "Menampilkan hasil untuk",
+        "Search instead for %@": "Cari %@ saja",
+        "AI Overview": "Ringkasan AI",
+        "Ask a follow-up": "Ajukan pertanyaan lanjutan",
+        "Visit page": "Kunjungi halaman",
+        "Share": "Bagikan",
+        "History": "Riwayat",
+        "Search chats": "Cari obrolan",
+        "Clear all history": "Hapus semua riwayat",
+        "Delete every chat on this device?": "Hapus semua obrolan di perangkat ini?",
+        "Delete all": "Hapus semua",
+        "Ask anything": "Tanyakan apa saja",
+        "AI Mode searches the web and answers with sources.": "Mode AI mencari di web dan menjawab dengan sumber.",
+        "Message": "Pesan",
+        "Cancel": "Batal",
+        "Submit": "Kirim",
+        "That video isn't on this device anymore.": "Video itu sudah tidak ada di perangkat ini.",
+        "Branch in new chat": "Cabangkan ke obrolan baru",
+        "Try again without searching": "Coba lagi tanpa mencari",
+        "Copy as Markdown": "Salin sebagai Markdown",
+        "Copy sources": "Salin sumber",
+        "Edit": "Edit",
+        "Copy": "Salin",
+        "There isn't a result available for this search.": "Tidak ada hasil untuk pencarian ini.",
+        "You can still get an answer from the model, but it won't be backed by sources.": "Anda tetap bisa mendapat jawaban dari model, tetapi tanpa dukungan sumber.",
+        "Continue anyway": "Tetap lanjutkan",
+        "Photos & Videos": "Foto & Video",
+        "Files": "File",
+        "Model": "Model",
+        "Fast": "Cepat",
+        "Pro": "Pro",
+        "Search": "Cari",
+        "AI Mode": "Mode AI",
+        "Search or ask anything": "Cari atau tanyakan apa saja",
+        "Copied": "Tersalin",
+        "Copied as Markdown": "Tersalin sebagai Markdown",
+        "Sources copied": "Sumber tersalin",
+        "Stop": "Berhenti",
+        "Send": "Kirim",
+        "Wait for the attachment to finish.": "Tunggu hingga lampiran selesai.",
+        "Couldn't read that video.": "Tidak dapat membaca video itu.",
+        "Couldn't read that photo.": "Tidak dapat membaca foto itu.",
+        "%@ isn't a text file.": "%@ bukan file teks."
+    ]
+    static let ja: [String: String] = [
+        "Settings": "設定",
+        "Appearance": "外観",
+        "Auto": "自動",
+        "Light": "ライト",
+        "Dark": "ダーク",
+        "Auto follows your device's appearance.": "自動はデバイスの外観設定に従います。",
+        "Language": "言語",
+        "System default": "システムの設定",
+        "Done": "完了",
+        "Preview": "プレビュー",
+        "Code": "コード",
+        "View": "表示",
+        "Writing the interactive block…": "インタラクティブブロックを作成中…",
+        "HTML Preview": "HTMLプレビュー",
+        "Model: %@": "モデル: %@",
+        "Disconnect": "切断",
+        "Connect to Gollama": "Gollama に接続",
+        "Private": "プライベート",
+        "Public": "パブリック",
+        "Connection": "接続",
+        "Same Wi-Fi as your computer": "コンピュータと同じ Wi-Fi",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "コンピュータの IP と Gollama のネットワークサーバーが使うポートを入力するか、スキャンして見つけます。",
+        "Scan ports up to": "スキャンするポートの上限",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "Gollama サーバーが見つかりません。サーバーがオンで、両方のデバイスが同じ Wi-Fi に接続されているか確認してください。",
+        "Server or tunnel URL": "サーバーまたはトンネルの URL",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "公開 Gollama サーバーまたは Cloudflare Tunnel で使えます。例: https://name.trycloudflare.com",
+        "Use a port": "ポートを使用",
+        "Connect": "接続",
+        "Stop scanning": "スキャンを停止",
+        "Scan network": "ネットワークをスキャン",
+        "Gollama Search": "Gollama 検索",
+        "Ask AI Mode": "AI モードに質問",
+        "Recent": "最近",
+        "Delete": "削除",
+        "Try": "試してみる",
+        "Copy link": "リンクをコピー",
+        "Showing results for": "次の検索結果を表示:",
+        "Search instead for %@": "代わりに「%@」を検索",
+        "AI Overview": "AI による概要",
+        "Ask a follow-up": "追加で質問",
+        "Visit page": "ページを開く",
+        "Share": "共有",
+        "History": "履歴",
+        "Search chats": "チャットを検索",
+        "Clear all history": "履歴をすべて消去",
+        "Delete every chat on this device?": "このデバイスのチャットをすべて削除しますか？",
+        "Delete all": "すべて削除",
+        "Ask anything": "何でも聞いてください",
+        "AI Mode searches the web and answers with sources.": "AI モードはウェブを検索し、出典付きで回答します。",
+        "Message": "メッセージ",
+        "Cancel": "キャンセル",
+        "Submit": "送信",
+        "That video isn't on this device anymore.": "その動画はもうこのデバイスにありません。",
+        "Branch in new chat": "新しいチャットに分岐",
+        "Try again without searching": "検索せずにもう一度",
+        "Copy as Markdown": "Markdown としてコピー",
+        "Copy sources": "出典をコピー",
+        "Edit": "編集",
+        "Copy": "コピー",
+        "There isn't a result available for this search.": "この検索には結果がありません。",
+        "You can still get an answer from the model, but it won't be backed by sources.": "モデルからの回答は得られますが、出典の裏付けはありません。",
+        "Continue anyway": "このまま続ける",
+        "Photos & Videos": "写真とビデオ",
+        "Files": "ファイル",
+        "Model": "モデル",
+        "Fast": "高速",
+        "Pro": "Pro",
+        "Search": "検索",
+        "AI Mode": "AI モード",
+        "Search or ask anything": "検索または質問",
+        "Copied": "コピーしました",
+        "Copied as Markdown": "Markdown としてコピーしました",
+        "Sources copied": "出典をコピーしました",
+        "Stop": "停止",
+        "Send": "送信",
+        "Wait for the attachment to finish.": "添付ファイルの処理が終わるまでお待ちください。",
+        "Couldn't read that video.": "その動画を読み込めませんでした。",
+        "Couldn't read that photo.": "その写真を読み込めませんでした。",
+        "%@ isn't a text file.": "%@ はテキストファイルではありません。"
+    ]
+    static let ko: [String: String] = [
+        "Settings": "설정",
+        "Appearance": "화면 스타일",
+        "Auto": "자동",
+        "Light": "라이트",
+        "Dark": "다크",
+        "Auto follows your device's appearance.": "자동은 기기의 화면 스타일을 따릅니다.",
+        "Language": "언어",
+        "System default": "시스템 기본값",
+        "Done": "완료",
+        "Preview": "미리보기",
+        "Code": "코드",
+        "View": "보기",
+        "Writing the interactive block…": "인터랙티브 블록 작성 중…",
+        "HTML Preview": "HTML 미리보기",
+        "Model: %@": "모델: %@",
+        "Disconnect": "연결 해제",
+        "Connect to Gollama": "Gollama에 연결",
+        "Private": "비공개",
+        "Public": "공개",
+        "Connection": "연결",
+        "Same Wi-Fi as your computer": "컴퓨터와 같은 Wi-Fi",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "컴퓨터의 IP와 Gollama 네트워크 서버가 사용하는 포트를 입력하거나 스캔해서 찾으세요.",
+        "Scan ports up to": "스캔할 포트 최대",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "Gollama 서버를 찾을 수 없습니다. 서버가 켜져 있고 두 기기가 같은 Wi-Fi에 연결되어 있는지 확인하세요.",
+        "Server or tunnel URL": "서버 또는 터널 URL",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "공개 Gollama 서버 또는 Cloudflare Tunnel에서 작동합니다. 예: https://name.trycloudflare.com",
+        "Use a port": "포트 사용",
+        "Connect": "연결",
+        "Stop scanning": "스캔 중지",
+        "Scan network": "네트워크 스캔",
+        "Gollama Search": "Gollama 검색",
+        "Ask AI Mode": "AI 모드에 질문",
+        "Recent": "최근",
+        "Delete": "삭제",
+        "Try": "추천",
+        "Copy link": "링크 복사",
+        "Showing results for": "다음 검색결과를 표시:",
+        "Search instead for %@": "대신 %@ 검색",
+        "AI Overview": "AI 개요",
+        "Ask a follow-up": "추가 질문하기",
+        "Visit page": "페이지 방문",
+        "Share": "공유",
+        "History": "기록",
+        "Search chats": "채팅 검색",
+        "Clear all history": "모든 기록 지우기",
+        "Delete every chat on this device?": "이 기기의 모든 채팅을 삭제할까요?",
+        "Delete all": "모두 삭제",
+        "Ask anything": "무엇이든 물어보세요",
+        "AI Mode searches the web and answers with sources.": "AI 모드는 웹을 검색하고 출처와 함께 답변합니다.",
+        "Message": "메시지",
+        "Cancel": "취소",
+        "Submit": "제출",
+        "That video isn't on this device anymore.": "해당 동영상이 더 이상 이 기기에 없습니다.",
+        "Branch in new chat": "새 채팅으로 분기",
+        "Try again without searching": "검색 없이 다시 시도",
+        "Copy as Markdown": "Markdown으로 복사",
+        "Copy sources": "출처 복사",
+        "Edit": "편집",
+        "Copy": "복사",
+        "There isn't a result available for this search.": "이 검색에 대한 결과가 없습니다.",
+        "You can still get an answer from the model, but it won't be backed by sources.": "모델의 답변은 받을 수 있지만 출처의 뒷받침은 없습니다.",
+        "Continue anyway": "그래도 계속",
+        "Photos & Videos": "사진 및 비디오",
+        "Files": "파일",
+        "Model": "모델",
+        "Fast": "빠름",
+        "Pro": "프로",
+        "Search": "검색",
+        "AI Mode": "AI 모드",
+        "Search or ask anything": "검색하거나 무엇이든 질문",
+        "Copied": "복사됨",
+        "Copied as Markdown": "Markdown으로 복사됨",
+        "Sources copied": "출처 복사됨",
+        "Stop": "중지",
+        "Send": "보내기",
+        "Wait for the attachment to finish.": "첨부 파일 처리가 끝날 때까지 기다리세요.",
+        "Couldn't read that video.": "해당 동영상을 읽을 수 없습니다.",
+        "Couldn't read that photo.": "해당 사진을 읽을 수 없습니다.",
+        "%@ isn't a text file.": "%@은(는) 텍스트 파일이 아닙니다."
+    ]
+    static let zhHans: [String: String] = [
+        "Settings": "设置",
+        "Appearance": "外观",
+        "Auto": "自动",
+        "Light": "浅色",
+        "Dark": "深色",
+        "Auto follows your device's appearance.": "自动将跟随设备的外观设置。",
+        "Language": "语言",
+        "System default": "系统默认",
+        "Done": "完成",
+        "Preview": "预览",
+        "Code": "代码",
+        "View": "视图",
+        "Writing the interactive block…": "正在编写交互式内容块…",
+        "HTML Preview": "HTML 预览",
+        "Model: %@": "模型：%@",
+        "Disconnect": "断开连接",
+        "Connect to Gollama": "连接到 Gollama",
+        "Private": "私有",
+        "Public": "公共",
+        "Connection": "连接",
+        "Same Wi-Fi as your computer": "与电脑相同的 Wi-Fi",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "输入电脑的 IP 和 Gollama 网络服务器使用的端口，或扫描查找。",
+        "Scan ports up to": "扫描端口至",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "未找到 Gollama 服务器。请确认服务器已开启，且两台设备连接同一 Wi-Fi。",
+        "Server or tunnel URL": "服务器或隧道 URL",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "适用于公共 Gollama 服务器或 Cloudflare Tunnel，例如 https://name.trycloudflare.com。",
+        "Use a port": "使用端口",
+        "Connect": "连接",
+        "Stop scanning": "停止扫描",
+        "Scan network": "扫描网络",
+        "Gollama Search": "Gollama 搜索",
+        "Ask AI Mode": "询问 AI 模式",
+        "Recent": "最近",
+        "Delete": "删除",
+        "Try": "试试",
+        "Copy link": "复制链接",
+        "Showing results for": "显示以下内容的结果：",
+        "Search instead for %@": "仍然搜索 %@",
+        "AI Overview": "AI 概览",
+        "Ask a follow-up": "继续提问",
+        "Visit page": "访问页面",
+        "Share": "分享",
+        "History": "历史记录",
+        "Search chats": "搜索聊天",
+        "Clear all history": "清除所有历史记录",
+        "Delete every chat on this device?": "要删除此设备上的所有聊天吗？",
+        "Delete all": "全部删除",
+        "Ask anything": "随便问",
+        "AI Mode searches the web and answers with sources.": "AI 模式会搜索网络并附带来源作答。",
+        "Message": "消息",
+        "Cancel": "取消",
+        "Submit": "提交",
+        "That video isn't on this device anymore.": "该视频已不在此设备上。",
+        "Branch in new chat": "在新聊天中分支",
+        "Try again without searching": "不搜索重试",
+        "Copy as Markdown": "复制为 Markdown",
+        "Copy sources": "复制来源",
+        "Edit": "编辑",
+        "Copy": "复制",
+        "There isn't a result available for this search.": "此搜索没有可用结果。",
+        "You can still get an answer from the model, but it won't be backed by sources.": "你仍可获得模型的回答，但没有来源支持。",
+        "Continue anyway": "仍然继续",
+        "Photos & Videos": "照片和视频",
+        "Files": "文件",
+        "Model": "模型",
+        "Fast": "快速",
+        "Pro": "专业",
+        "Search": "搜索",
+        "AI Mode": "AI 模式",
+        "Search or ask anything": "搜索或提问",
+        "Copied": "已复制",
+        "Copied as Markdown": "已复制为 Markdown",
+        "Sources copied": "已复制来源",
+        "Stop": "停止",
+        "Send": "发送",
+        "Wait for the attachment to finish.": "请等待附件处理完成。",
+        "Couldn't read that video.": "无法读取该视频。",
+        "Couldn't read that photo.": "无法读取该照片。",
+        "%@ isn't a text file.": "%@ 不是文本文件。"
+    ]
+    static let zhHant: [String: String] = [
+        "Settings": "設定",
+        "Appearance": "外觀",
+        "Auto": "自動",
+        "Light": "淺色",
+        "Dark": "深色",
+        "Auto follows your device's appearance.": "自動會跟隨裝置的外觀設定。",
+        "Language": "語言",
+        "System default": "系統預設",
+        "Done": "完成",
+        "Preview": "預覽",
+        "Code": "程式碼",
+        "View": "檢視",
+        "Writing the interactive block…": "正在撰寫互動區塊…",
+        "HTML Preview": "HTML 預覽",
+        "Model: %@": "模型：%@",
+        "Disconnect": "中斷連線",
+        "Connect to Gollama": "連線到 Gollama",
+        "Private": "私人",
+        "Public": "公開",
+        "Connection": "連線",
+        "Same Wi-Fi as your computer": "與電腦相同的 Wi-Fi",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "輸入電腦的 IP 與 Gollama 網路伺服器使用的連接埠，或掃描來尋找。",
+        "Scan ports up to": "掃描連接埠至",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "找不到 Gollama 伺服器。請確認伺服器已開啟，且兩台裝置連接同一個 Wi-Fi。",
+        "Server or tunnel URL": "伺服器或通道 URL",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "適用於公開的 Gollama 伺服器或 Cloudflare Tunnel，例如 https://name.trycloudflare.com。",
+        "Use a port": "使用連接埠",
+        "Connect": "連線",
+        "Stop scanning": "停止掃描",
+        "Scan network": "掃描網路",
+        "Gollama Search": "Gollama 搜尋",
+        "Ask AI Mode": "詢問 AI 模式",
+        "Recent": "最近",
+        "Delete": "刪除",
+        "Try": "試試",
+        "Copy link": "拷貝連結",
+        "Showing results for": "顯示以下內容的結果：",
+        "Search instead for %@": "改為搜尋 %@",
+        "AI Overview": "AI 總覽",
+        "Ask a follow-up": "繼續提問",
+        "Visit page": "前往頁面",
+        "Share": "分享",
+        "History": "記錄",
+        "Search chats": "搜尋對話",
+        "Clear all history": "清除所有記錄",
+        "Delete every chat on this device?": "要刪除此裝置上的所有對話嗎？",
+        "Delete all": "全部刪除",
+        "Ask anything": "盡管問",
+        "AI Mode searches the web and answers with sources.": "AI 模式會搜尋網路並附上來源回答。",
+        "Message": "訊息",
+        "Cancel": "取消",
+        "Submit": "送出",
+        "That video isn't on this device anymore.": "該影片已不在此裝置上。",
+        "Branch in new chat": "在新對話中建立分支",
+        "Try again without searching": "不搜尋再試一次",
+        "Copy as Markdown": "拷貝為 Markdown",
+        "Copy sources": "拷貝來源",
+        "Edit": "編輯",
+        "Copy": "拷貝",
+        "There isn't a result available for this search.": "此搜尋沒有可用的結果。",
+        "You can still get an answer from the model, but it won't be backed by sources.": "你仍可取得模型的回答，但沒有來源佐證。",
+        "Continue anyway": "仍然繼續",
+        "Photos & Videos": "照片和影片",
+        "Files": "檔案",
+        "Model": "模型",
+        "Fast": "快速",
+        "Pro": "專業",
+        "Search": "搜尋",
+        "AI Mode": "AI 模式",
+        "Search or ask anything": "搜尋或提問",
+        "Copied": "已拷貝",
+        "Copied as Markdown": "已拷貝為 Markdown",
+        "Sources copied": "已拷貝來源",
+        "Stop": "停止",
+        "Send": "傳送",
+        "Wait for the attachment to finish.": "請等待附件處理完成。",
+        "Couldn't read that video.": "無法讀取該影片。",
+        "Couldn't read that photo.": "無法讀取該照片。",
+        "%@ isn't a text file.": "%@ 不是文字檔。"
+    ]
+    static let cs: [String: String] = [
+        "Settings": "Nastavení",
+        "Appearance": "Vzhled",
+        "Auto": "Automaticky",
+        "Light": "Světlý",
+        "Dark": "Tmavý",
+        "Auto follows your device's appearance.": "Automaticky se řídí vzhledem zařízení.",
+        "Language": "Jazyk",
+        "System default": "Výchozí systémové",
+        "Done": "Hotovo",
+        "Preview": "Náhled",
+        "Code": "Kód",
+        "View": "Zobrazení",
+        "Writing the interactive block…": "Zapisuje se interaktivní blok…",
+        "HTML Preview": "Náhled HTML",
+        "Model: %@": "Model: %@",
+        "Disconnect": "Odpojit",
+        "Connect to Gollama": "Připojit ke Gollama",
+        "Private": "Soukromá",
+        "Public": "Veřejná",
+        "Connection": "Připojení",
+        "Same Wi-Fi as your computer": "Stejná Wi-Fi jako počítač",
+        "Enter the computer's IP and the port Gollama's network server uses, or scan to find it.": "Zadejte IP adresu počítače a port síťového serveru Gollama nebo je vyhledejte skenováním.",
+        "Scan ports up to": "Skenovat porty do",
+        "No Gollama server found. Check the server is on and both devices share the same Wi-Fi.": "Server Gollama nebyl nalezen. Zkontrolujte, zda server běží a obě zařízení jsou ve stejné Wi-Fi.",
+        "Server or tunnel URL": "URL serveru nebo tunelu",
+        "Works with a public Gollama server or a Cloudflare Tunnel, for example https://name.trycloudflare.com.": "Funguje s veřejným serverem Gollama nebo tunelem Cloudflare, například https://name.trycloudflare.com.",
+        "Use a port": "Použít port",
+        "Connect": "Připojit",
+        "Stop scanning": "Zastavit skenování",
+        "Scan network": "Skenovat síť",
+        "Gollama Search": "Hledat v Gollama",
+        "Ask AI Mode": "Zeptat se v režimu AI",
+        "Recent": "Nedávné",
+        "Delete": "Smazat",
+        "Try": "Zkuste",
+        "Copy link": "Kopírovat odkaz",
+        "Showing results for": "Zobrazují se výsledky pro",
+        "Search instead for %@": "Hledat místo toho %@",
+        "AI Overview": "Přehled od AI",
+        "Ask a follow-up": "Zeptat se na další",
+        "Visit page": "Navštívit stránku",
+        "Share": "Sdílet",
+        "History": "Historie",
+        "Search chats": "Hledat v chatech",
+        "Clear all history": "Vymazat celou historii",
+        "Delete every chat on this device?": "Smazat všechny chaty v tomto zařízení?",
+        "Delete all": "Smazat vše",
+        "Ask anything": "Ptejte se na cokoli",
+        "AI Mode searches the web and answers with sources.": "Režim AI prohledává web a odpovídá se zdroji.",
+        "Message": "Zpráva",
+        "Cancel": "Zrušit",
+        "Submit": "Odeslat",
+        "That video isn't on this device anymore.": "Toto video už v tomto zařízení není.",
+        "Branch in new chat": "Odbočit do nového chatu",
+        "Try again without searching": "Zkusit znovu bez vyhledávání",
+        "Copy as Markdown": "Kopírovat jako Markdown",
+        "Copy sources": "Kopírovat zdroje",
+        "Edit": "Upravit",
+        "Copy": "Kopírovat",
+        "There isn't a result available for this search.": "Pro toto hledání není k dispozici žádný výsledek.",
+        "You can still get an answer from the model, but it won't be backed by sources.": "Odpověď od modelu stále získáte, ale nebude podložena zdroji.",
+        "Continue anyway": "Přesto pokračovat",
+        "Photos & Videos": "Fotky a videa",
+        "Files": "Soubory",
+        "Model": "Model",
+        "Fast": "Rychlý",
+        "Pro": "Pro",
+        "Search": "Hledat",
+        "AI Mode": "Režim AI",
+        "Search or ask anything": "Hledejte nebo se na cokoli zeptejte",
+        "Copied": "Zkopírováno",
+        "Copied as Markdown": "Zkopírováno jako Markdown",
+        "Sources copied": "Zdroje zkopírovány",
+        "Stop": "Zastavit",
+        "Send": "Odeslat",
+        "Wait for the attachment to finish.": "Počkejte, až se příloha dokončí.",
+        "Couldn't read that video.": "Video se nepodařilo načíst.",
+        "Couldn't read that photo.": "Fotku se nepodařilo načíst.",
+        "%@ isn't a text file.": "%@ není textový soubor."
+    ]
 }
