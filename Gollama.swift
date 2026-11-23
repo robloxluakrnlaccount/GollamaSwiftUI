@@ -2527,8 +2527,12 @@ struct RootView: View {
                     // Rounded (concentric with the device corners) as soon as the sidebar starts to open,
                     // then relaxes back to a square by the time it is fully open.
                     ZStack {
-                        Color.black.clipShape(.rect(corners: .concentric))
-                        Rectangle().opacity(1 - cardRounding)
+                        // ignoresSafeArea goes on the shape's own view *before* the clip, so the concentric
+                        // corners are resolved against the full-screen frame instead of the safe-area inset one
+                        Color.black
+                            .ignoresSafeArea()
+                            .clipShape(.rect(corners: .concentric))
+                        Rectangle().opacity(1 - cardRounding).ignoresSafeArea()
                     }
                     .ignoresSafeArea()
                 }
