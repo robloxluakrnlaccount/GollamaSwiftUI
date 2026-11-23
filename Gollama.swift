@@ -2480,7 +2480,6 @@ struct RootView: View {
     @Environment(\.horizontalSizeClass) private var hSize
     @State private var drag: CGFloat = 0
     @State private var width: CGFloat = 390
-    private let corner: CGFloat = 50      // roughly the corner radius of a Face ID iPhone
 
     private var compact: Bool { hSize != .regular }
     private var drawerW: CGFloat { min(width * 0.84, 340) }
@@ -2488,6 +2487,16 @@ struct RootView: View {
         guard compact, app.connected else { return 0 }
         let base: CGFloat = app.sidebarOpen ? drawerW : 0
         return min(max((base + drag) / drawerW, 0), 1)
+    }
+
+    /// 0 = square corners, 1 = full concentric corners.
+    /// Pops in over the first few percent of the slide, then eases back to 0 as the drawer finishes opening.
+    private var cardRounding: CGFloat {
+        guard progress > 0 else { return 0 }
+        let rampIn = min(progress / 0.05, 1)
+        let t = min(max((progress - 0.55) / 0.45, 0), 1)
+        let rampOut = 1 - t * t * (3 - 2 * t)
+        return rampIn * rampOut
     }
 
     var body: some View {
@@ -2514,7 +2523,15 @@ struct RootView: View {
                         Color.black.opacity(0.14 * progress).onTapGesture { app.closeSidebar() }
                     }
                 }
-                .mask { RoundedRectangle(cornerRadius: corner * progress, style: .continuous).ignoresSafeArea() }
+                .mask {
+                    // Rounded (concentric with the device corners) as soon as the sidebar starts to open,
+                    // then relaxes back to a square by the time it is fully open.
+                    ZStack {
+                        Color.black.clipShape(.rect(corners: .concentric))
+                        Rectangle().opacity(1 - cardRounding)
+                    }
+                    .ignoresSafeArea()
+                }
                 .shadow(color: .black.opacity(0.28 * progress), radius: 24, x: -6)
                 .offset(x: progress * drawerW)
                 .transition(.opacity)
@@ -2552,7 +2569,9 @@ struct RootView: View {
                 guard compact, app.connected else { return }
                 guard abs(v.translation.width) > abs(v.translation.height) * 1.2 else { return }
                 if app.sidebarOpen {
-                    drag = min(0, max(-drawerW, v.translation.width))
+                    if v.startLocation.x >= drawerW - 20 {
+                        drag = min(0, max(-drawerW, v.translation.width))
+                    }
                 } else if app.mainTab == .mode && v.startLocation.x < 60 {
                     drag = min(drawerW, max(0, v.translation.width))
                 }
@@ -3689,18 +3708,6 @@ struct TurnView: View {
                             Button("Edit", systemImage: "pencil") { app.beginEdit(turn) }
                             Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = turn.text; app.flash("Copied") }
                         }
-                    if turn.done && !app.modeBusy {
-                        HStack(spacing: 2) {
-                            Button { UIPasteboard.general.string = turn.text; app.flash("Copied") } label: {
-                                Image(systemName: "doc.on.doc").font(.system(size: 13)).frame(width: 32, height: 28)
-                            }
-                            Button { app.beginEdit(turn) } label: {
-                                Image(systemName: "pencil").font(.system(size: 13)).frame(width: 32, height: 28)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                    }
                 }
             }
         }
