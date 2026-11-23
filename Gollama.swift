@@ -2963,7 +2963,8 @@ struct HomeScreen: View {
                     }
                     Spacer(minLength: 60)
                 }
-                .frame(width: min(geo.size.width, 720), minHeight: geo.size.height)
+                .frame(width: min(geo.size.width, 720))
+                .frame(minHeight: geo.size.height)
                 .frame(maxWidth: .infinity)
             }
             .scrollDismissesKeyboard(.interactively)
