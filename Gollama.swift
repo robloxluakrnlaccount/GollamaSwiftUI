@@ -149,28 +149,31 @@ struct FlowLayout: Layout {
     var spacing: CGFloat = 8
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let maxW = proposal.width ?? .infinity
+        let childProposal = maxW.isFinite ? ProposedViewSize(width: maxW, height: nil) : .unspecified
         var x: CGFloat = 0
         var y: CGFloat = 0
         var rowH: CGFloat = 0
         var w: CGFloat = 0
         for s in subviews {
-            let sz = s.sizeThatFits(.unspecified)
+            let sz = s.sizeThatFits(childProposal)
             if x + sz.width > maxW && x > 0 { y += rowH + spacing; x = 0; rowH = 0 }
             x += sz.width + spacing
             rowH = max(rowH, sz.height)
-            w = max(w, x - spacing)
+            w = max(w, min(maxW, x - spacing))
         }
-        return CGSize(width: w, height: y + rowH)
+        return CGSize(width: maxW.isFinite ? min(maxW, w) : w, height: y + rowH)
     }
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let childProposal = ProposedViewSize(width: bounds.width, height: nil)
         var x = bounds.minX
         var y = bounds.minY
         var rowH: CGFloat = 0
         for s in subviews {
-            let sz = s.sizeThatFits(.unspecified)
+            let sz = s.sizeThatFits(childProposal)
             if x + sz.width > bounds.maxX && x > bounds.minX { y += rowH + spacing; x = bounds.minX; rowH = 0 }
-            s.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(sz))
-            x += sz.width + spacing
+            let clampedW = min(sz.width, bounds.width)
+            s.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(width: clampedW, height: sz.height))
+            x += clampedW + spacing
             rowH = max(rowH, sz.height)
         }
     }
@@ -2089,32 +2092,102 @@ struct MathBlock: View {
     }
 }
 
+struct HTMLPreviewView: UIViewRepresentable {
+    let html: String
+    @Binding var height: CGFloat
+    var onLink: (URL) -> Void = { _ in }
+
+    func makeCoordinator() -> Coordinator { Coordinator(height: $height, onLink: onLink) }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let cfg = WKWebViewConfiguration()
+        cfg.allowsInlineMediaPlayback = true
+        let wv = WKWebView(frame: .zero, configuration: cfg)
+        wv.navigationDelegate = context.coordinator
+        wv.isOpaque = false
+        wv.backgroundColor = .clear
+        wv.scrollView.isScrollEnabled = true
+        wv.scrollView.backgroundColor = .clear
+        return wv
+    }
+
+    func updateUIView(_ wv: WKWebView, context: Context) {
+        context.coordinator.onLink = onLink
+        if context.coordinator.lastHTML != html {
+            context.coordinator.lastHTML = html
+            let lower = html.lowercased()
+            let wrapped: String
+            if lower.contains("<html") || lower.contains("<!doctype") {
+                wrapped = html
+            } else {
+                wrapped = """
+                <!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>body{font-family:-apple-system,sans-serif;margin:12px;color:#111;background:#fff;}@media(prefers-color-scheme:dark){body{color:#f5f5f5;background:#1c1c1e;}}</style></head><body>\(html)</body></html>
+                """
+            }
+            wv.loadHTMLString(wrapped, baseURL: nil)
+        }
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var lastHTML = ""
+        @Binding var height: CGFloat
+        var onLink: (URL) -> Void
+        init(height: Binding<CGFloat>, onLink: @escaping (URL) -> Void) {
+            _height = height
+            self.onLink = onLink
+        }
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            Task { @MainActor in
+                if let res = try? await webView.evaluateJavaScript("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"),
+                   let num = res as? NSNumber {
+                    let h = CGFloat(num.doubleValue)
+                    if h > 20 {
+                        self.height = min(max(h, 140), 420)
+                    }
+                }
+            }
+        }
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            if navigationAction.navigationType == .linkActivated, let u = navigationAction.request.url {
+                onLink(u)
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
+        }
+    }
+}
+
 /// ```run.html blocks (and "html live" / "html run") run right in the chat, like the website's Interactive HTML box.
 struct LiveHTMLBlock: View {
     let code: String
     let open: Bool
     @Environment(AppModel.self) private var app
-    @Environment(\.colorScheme) private var scheme
-    @State private var h: CGFloat = 140
+    @State private var h: CGFloat = 220
     @State private var runId = UUID()
     @State private var showCode = false
+    @State private var fullScreen = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            HStack(spacing: 12) {
                 Label("Interactive HTML", systemImage: "play.rectangle").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
                 Spacer()
                 if !open {
-                    Button("Re-run", systemImage: "arrow.clockwise") { runId = UUID(); h = 140 }
+                    Button("Re-run", systemImage: "arrow.clockwise") { runId = UUID(); h = 220 }
                         .font(.footnote).buttonStyle(.plain).foregroundStyle(Pal.blue)
+                    Button { fullScreen = true } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right").font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
                 }
             }
             if open {
                 HStack(spacing: 8) { ThinkingDots(); Text("Writing the interactive block…").font(.footnote).foregroundStyle(.secondary) }
                     .padding(.vertical, 12)
             } else {
-                HTMLWebView(html: LiveHTML.page(code, dark: scheme == .dark), height: $h, onLink: { app.open($0) })
-                    .frame(height: max(40, h))
+                HTMLPreviewView(html: code, height: $h, onLink: { app.open($0) })
+                    .frame(height: h)
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .id(runId)
             }
@@ -2126,7 +2199,20 @@ struct LiveHTMLBlock: View {
             Text("AI-generated. Don't enter sensitive personal info.").font(.caption2).foregroundStyle(.secondary)
         }
         .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .glassEffect(.regular, in: .rect(cornerRadius: 20))
+        .clipped()
+        .sheet(isPresented: $fullScreen) {
+            NavigationStack {
+                HTMLPreviewView(html: code, height: .constant(600), onLink: { app.open($0) })
+                    .ignoresSafeArea(edges: .bottom)
+                    .navigationTitle("Interactive HTML")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) { Button("Done") { fullScreen = false } }
+                    }
+            }
+        }
     }
 }
 
@@ -2137,9 +2223,8 @@ struct CodeBlock: View {
     let open: Bool
     var note: String?
     @Environment(AppModel.self) private var app
-    @Environment(\.colorScheme) private var scheme
     @State private var preview = false
-    @State private var h: CGFloat = 140
+    @State private var h: CGFloat = 220
 
     private var canRun: Bool { !open && ["html", "svg"].contains(lang.lowercased()) }
 
@@ -2156,8 +2241,8 @@ struct CodeBlock: View {
                     .buttonStyle(.plain).foregroundStyle(.secondary)
             }
             if preview {
-                HTMLWebView(html: LiveHTML.page(code, dark: scheme == .dark), height: $h, onLink: { app.open($0) })
-                    .frame(height: max(40, h))
+                HTMLPreviewView(html: code, height: $h, onLink: { app.open($0) })
+                    .frame(height: h)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             } else {
                 ScrollView(.horizontal) { Text(code).font(.system(.footnote, design: .monospaced)).textSelection(.enabled).padding(.vertical, 4) }
@@ -2165,7 +2250,9 @@ struct CodeBlock: View {
             if let note { Text(note).font(.caption2).foregroundStyle(.secondary) }
         }
         .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        .clipped()
     }
 }
 
@@ -2491,25 +2578,13 @@ struct SafariView: UIViewControllerRepresentable {
     }
 }
 
-/// Links open here, inside the app. The button below opens the same page in Safari instead.
+/// Links open here inside SFSafariViewController, which includes native Close and Open in Safari controls.
 struct BrowserSheet: View {
     let item: BrowserItem
     @Environment(AppModel.self) private var app
     var body: some View {
-        VStack(spacing: 0) {
-            SafariView(url: item.url) { app.browser = nil }
-            HStack(spacing: 12) {
-                Button { UIApplication.shared.open(item.url) } label: {
-                    Label("Open in Safari", systemImage: "safari").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.glassProminent).tint(Pal.blue)
-                Button("Close") { app.browser = nil }.buttonStyle(.glass)
-            }
-            .controlSize(.large)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-        }
-        .background(.bar)
+        SafariView(url: item.url) { app.browser = nil }
+            .ignoresSafeArea()
     }
 }
 
@@ -2889,12 +2964,13 @@ struct HomeScreen: View {
                                 }
                             }
                         }
-                        .padding(.horizontal, 24).padding(.top, 30).readableWidth(640)
+                        .padding(.horizontal, 24).padding(.top, 30)
+                        .frame(maxWidth: min(geo.size.width, 640), alignment: .leading)
                     }
                     Spacer(minLength: 60)
                 }
-                .frame(minHeight: geo.size.height)
-                .readableWidth(720)
+                .frame(width: min(geo.size.width, 720), minHeight: geo.size.height)
+                .frame(maxWidth: .infinity)
             }
             .scrollDismissesKeyboard(.interactively)
         }
