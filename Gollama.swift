@@ -882,7 +882,12 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
     func addRecent(_ q: String) {
         recents.removeAll { $0.lowercased() == q.lowercased() }
         recents.insert(q, at: 0)
-        if recents.count > 8 { recents = Array(recents.prefix(8)) }
+        if recents.count > 5 { recents = Array(recents.prefix(5)) }
+        UserDefaults.standard.set(recents, forKey: "gollama.recents")
+    }
+
+    func removeRecent(_ q: String) {
+        recents.removeAll { $0 == q }
         UserDefaults.standard.set(recents, forKey: "gollama.recents")
     }
 
@@ -2970,12 +2975,20 @@ struct HomeScreen: View {
                             if !app.recents.isEmpty {
                                 Text("Recent").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
                                 FlowLayout(spacing: 8) {
-                                    ForEach(app.recents, id: \.self) { r in
+                                    ForEach(Array(app.recents.prefix(5)), id: \.self) { r in
                                         Button { text = r; app.submit(r) } label: {
                                             Label(r, systemImage: "clock").font(.subheadline).lineLimit(1)
                                                 .padding(.horizontal, 12).padding(.vertical, 8)
                                                 .glassEffect(.regular.interactive(), in: .capsule)
-                                        }.buttonStyle(.plain)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .contextMenu {
+                                            Button("Delete", systemImage: "trash", role: .destructive) {
+                                                withAnimation(.smooth(duration: 0.2)) {
+                                                    app.removeRecent(r)
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
