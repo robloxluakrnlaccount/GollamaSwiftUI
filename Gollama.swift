@@ -1602,6 +1602,9 @@ enum AnswerParser {
         let words = info.lowercased().split(separator: " ").map(String.init)
         let first = words.first ?? ""
         var kind = liveKinds[first]
+        if kind == nil, first.contains("run.html") || first.contains("live.html") {
+            kind = "html"
+        }
         if kind == nil, words.contains(where: { $0 == "live" || $0 == "run" }) {
             if first == "html" { kind = "html" } else if first == "python" || first == "py" { kind = "python" }
         }
@@ -2124,7 +2127,7 @@ struct HTMLPreviewView: UIViewRepresentable {
                 <!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>body{font-family:-apple-system,sans-serif;margin:12px;color:#111;background:#fff;}@media(prefers-color-scheme:dark){body{color:#f5f5f5;background:#1c1c1e;}}</style></head><body>\(html)</body></html>
                 """
             }
-            wv.loadHTMLString(wrapped, baseURL: URL(string: "https://localhost"))
+            wv.loadHTMLString(wrapped, baseURL: nil)
         }
     }
 
@@ -2152,26 +2155,33 @@ struct HTMLPreviewView: UIViewRepresentable {
     }
 }
 
-/// ```run.html blocks (and "html live" / "html run") run right in the chat, like the website's Interactive HTML box.
+/// ```run.html blocks (and "html live" / "html run") run right in the chat via WKWebView.
 struct LiveHTMLBlock: View {
     let code: String
     let open: Bool
     @Environment(AppModel.self) private var app
+    @State private var showPreview = true
     @State private var h: CGFloat = 220
     @State private var runId = UUID()
-    @State private var showCode = false
     @State private var fullScreen = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
-                Label("Interactive HTML", systemImage: "play.rectangle").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Picker("View", selection: $showPreview) {
+                    Text("Preview").tag(true)
+                    Text("Code").tag(false)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 150)
                 Spacer()
                 if !open {
-                    Button("Re-run", systemImage: "arrow.clockwise") { runId = UUID(); h = 220 }
-                        .font(.footnote).buttonStyle(.plain).foregroundStyle(Pal.blue)
+                    Button { runId = UUID(); h = 220 } label: {
+                        Image(systemName: "arrow.clockwise").font(.caption.weight(.semibold)).padding(6)
+                    }
+                    .buttonStyle(.plain).foregroundStyle(Pal.blue)
                     Button { fullScreen = true } label: {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right").font(.caption.weight(.semibold))
+                        Image(systemName: "arrow.up.left.and.arrow.down.right").font(.caption.weight(.semibold)).padding(6)
                     }
                     .buttonStyle(.plain).foregroundStyle(.secondary)
                 }
@@ -2179,28 +2189,26 @@ struct LiveHTMLBlock: View {
             if open {
                 HStack(spacing: 8) { ThinkingDots(); Text("Writing the interactive block…").font(.footnote).foregroundStyle(.secondary) }
                     .padding(.vertical, 12)
-            } else {
+            } else if showPreview {
                 HTMLPreviewView(html: code, height: $h, onLink: { app.open($0) })
                     .frame(height: h)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .id(runId)
+            } else {
+                ScrollView(.horizontal) {
+                    Text(code).font(.system(.footnote, design: .monospaced)).padding(4).textSelection(.enabled)
+                }
             }
-            DisclosureGroup("Show code", isExpanded: $showCode) {
-                ScrollView(.horizontal) { Text(code).font(.system(.footnote, design: .monospaced)).textSelection(.enabled).padding(10) }
-            }
-            .font(.footnote)
-            .tint(.secondary)
-            Text("AI-generated. Don't enter sensitive personal info.").font(.caption2).foregroundStyle(.secondary)
         }
-        .padding(14)
+        .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: .rect(cornerRadius: 20))
+        .glassEffect(.regular, in: .rect(cornerRadius: 14))
         .clipped()
         .sheet(isPresented: $fullScreen) {
             NavigationStack {
                 HTMLPreviewView(html: code, height: .constant(600), onLink: { app.open($0) })
                     .ignoresSafeArea(edges: .bottom)
-                    .navigationTitle("Interactive HTML")
+                    .navigationTitle("HTML Preview")
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .topBarTrailing) { Button("Done") { fullScreen = false } }
