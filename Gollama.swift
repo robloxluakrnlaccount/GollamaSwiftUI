@@ -2097,7 +2097,7 @@ struct HTMLPreviewView: UIViewRepresentable {
     @Binding var height: CGFloat
     var onLink: (URL) -> Void = { _ in }
 
-    func makeCoordinator() -> Coordinator { Coordinator(height: $height, onLink: onLink) }
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
@@ -2112,7 +2112,7 @@ struct HTMLPreviewView: UIViewRepresentable {
     }
 
     func updateUIView(_ wv: WKWebView, context: Context) {
-        context.coordinator.onLink = onLink
+        context.coordinator.parent = self
         if context.coordinator.lastHTML != html {
             context.coordinator.lastHTML = html
             let lower = html.lowercased()
@@ -2128,28 +2128,22 @@ struct HTMLPreviewView: UIViewRepresentable {
         }
     }
 
-    @MainActor final class Coordinator: NSObject, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var parent: HTMLPreviewView
         var lastHTML = ""
-        @Binding var height: CGFloat
-        var onLink: (URL) -> Void
-        init(height: Binding<CGFloat>, onLink: @escaping (URL) -> Void) {
-            _height = height
-            self.onLink = onLink
-        }
+        init(_ p: HTMLPreviewView) { parent = p }
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            Task { @MainActor in
-                if let res = try? await webView.evaluateJavaScript("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"),
-                   let num = res as? NSNumber {
-                    let h = CGFloat(num.doubleValue)
-                    if h > 20 {
-                        self.height = min(max(h, 140), 420)
-                    }
+            webView.evaluateJavaScript("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)") { res, _ in
+                guard let num = res as? NSNumber else { return }
+                let h = CGFloat(num.doubleValue)
+                if h > 20 {
+                    DispatchQueue.main.async { self.parent.height = min(max(h, 140), 420) }
                 }
             }
         }
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             if navigationAction.navigationType == .linkActivated, let u = navigationAction.request.url {
-                onLink(u)
+                parent.onLink(u)
                 decisionHandler(.cancel)
                 return
             }
