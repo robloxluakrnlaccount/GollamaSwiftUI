@@ -16,6 +16,10 @@ import PhotosUI
 import UniformTypeIdentifiers
 import UIKit
 import Foundation
+import WebKit
+import SafariServices
+import AVFoundation
+import AVKit
 
 // MARK: - App
 
@@ -131,6 +135,155 @@ struct SendButton: View {
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
+    }
+}
+
+struct IdentifiableURL: Identifiable, Hashable {
+    let id = UUID()
+    let url: URL
+}
+
+struct SafariSheet: UIViewControllerRepresentable {
+    let url: URL
+    func makeUIViewController(context: Context) -> SFSafariViewController {
+        let vc = SFSafariViewController(url: url)
+        vc.preferredControlTintColor = UIColor(Pal.blue)
+        return vc
+    }
+    func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {}
+}
+
+struct VideoPlayerSheet: View {
+    let url: URL
+    @Environment(\.dismiss) private var dismiss
+    @State private var player: AVPlayer?
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let player {
+                    VideoPlayer(player: player)
+                        .ignoresSafeArea(edges: .bottom)
+                } else {
+                    ProgressView()
+                }
+            }
+            .navigationTitle(url.lastPathComponent)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .onAppear {
+            let p = AVPlayer(url: url)
+            player = p
+            p.play()
+        }
+        .onDisappear {
+            player?.pause()
+            player = nil
+        }
+    }
+}
+
+struct HTMLPreviewView: UIViewRepresentable {
+    let html: String
+    @Binding var height: CGFloat
+
+    func makeCoordinator() -> Coordinator { Coordinator(height: $height) }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let cfg = WKWebViewConfiguration()
+        cfg.allowsInlineMediaPlayback = true
+        let wv = WKWebView(frame: .zero, configuration: cfg)
+        wv.navigationDelegate = context.coordinator
+        wv.isOpaque = false
+        wv.backgroundColor = .clear
+        wv.scrollView.isScrollEnabled = true
+        wv.scrollView.backgroundColor = .clear
+        return wv
+    }
+
+    func updateUIView(_ wv: WKWebView, context: Context) {
+        if context.coordinator.lastHTML != html {
+            context.coordinator.lastHTML = html
+            let lower = html.lowercased()
+            let wrapped: String
+            if lower.contains("<html") || lower.contains("<!doctype") {
+                wrapped = html
+            } else {
+                wrapped = """
+                <!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>body{font-family:-apple-system,sans-serif;margin:12px;color:#111;background:#fff;}@media(prefers-color-scheme:dark){body{color:#f5f5f5;background:#1c1c1e;}}</style></head><body>\(html)</body></html>
+                """
+            }
+            wv.loadHTMLString(wrapped, baseURL: nil)
+        }
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var lastHTML = ""
+        @Binding var height: CGFloat
+        init(height: Binding<CGFloat>) { _height = height }
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            webView.evaluateJavaScript("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)") { res, _ in
+                if let h = res as? CGFloat, h > 20 {
+                    DispatchQueue.main.async {
+                        self.height = min(max(h, 140), 420)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Observable @MainActor final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
+    var speakingTurnId: Int?
+    private let synth = AVSpeechSynthesizer()
+
+    override init() {
+        super.init()
+        synth.delegate = self
+    }
+
+    func toggle(turnId: Int, text: String) {
+        if speakingTurnId == turnId {
+            stop()
+            return
+        }
+        stop()
+        let clean = Self.cleanForSpeech(text)
+        guard !clean.isEmpty else { return }
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+        try? AVAudioSession.sharedInstance().setActive(true)
+        let utt = AVSpeechUtterance(string: clean)
+        utt.rate = AVSpeechUtteranceDefaultSpeechRate
+        speakingTurnId = turnId
+        synth.speak(utt)
+    }
+
+    func stop() {
+        if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }
+        speakingTurnId = nil
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        Task { @MainActor in self.speakingTurnId = nil }
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        Task { @MainActor in self.speakingTurnId = nil }
+    }
+
+    private static func cleanForSpeech(_ raw: String) -> String {
+        var out = raw
+        out = out.replacingOccurrences(of: #"\[\[suggest:[^\]]*\]\]"#, with: "", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"\[\[hl:\s*(.*?)\]\]"#, with: "$1", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"\s?\[[\d\s,]+\]"#, with: "", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"```[\s\S]*?```"#, with: " code block. ", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"\*\*|__|`|#{1,6}\s*"#, with: "", options: .regularExpression)
+        return out.trimmed
     }
 }
 
@@ -340,6 +493,7 @@ enum AttachKind { case image, file, video }
     var b64 = ""
     var text = ""
     var videoId: String?
+    var videoURL: URL?
     var state = "ready"          // ready | uploading | processing | error
     var progress = 0.0
     var message = ""
@@ -349,7 +503,7 @@ enum AttachKind { case image, file, video }
 
 @Observable final class ModeTurn: Identifiable {
     let id: Int
-    let text: String
+    var text: String
     var answer = ""
     var status = ""
     var think = ""
@@ -365,6 +519,7 @@ enum AttachKind { case image, file, video }
     var fileDicts: [[String: String]] = []
     var videoIds: [String] = []
     var videoNames: [String] = []
+    var videoURLs: [URL] = []
     init(id: Int, text: String) { self.id = id; self.text = text }
 }
 
@@ -402,6 +557,8 @@ struct VideoFile: Transferable {
     var tier = "fast"
     var thinkMode: String?
     var notice: String?
+    var openedURL: IdentifiableURL?
+    var speech = SpeechManager()
 
     var mainTab: MainTab = .search
 
@@ -647,6 +804,12 @@ struct VideoFile: Transferable {
             nextTurn += 1
             t.answer = td["buf"] as? String ?? ""
             t.sources = Hit.list(td["results"])
+            t.steps = td["steps"] as? [String] ?? []
+            if let th = td["think"] as? String {
+                t.think = th
+            } else if let arr = td["think"] as? [String] {
+                t.think = arr.joined(separator: "\n")
+            }
             t.done = true
             if let att = td["att"] as? [String: Any] {
                 var names = att["images"] as? [String] ?? []
@@ -687,7 +850,9 @@ struct VideoFile: Transferable {
         let saved: [[String: Any]] = turns.filter { $0.done && !$0.answer.isEmpty }.map { t in
             [
                 "text": t.text, "query": t.text, "buf": t.answer, "status": "done",
-                "results": t.sources.map { $0.asDict }, "think": [Any](),
+                "results": t.sources.map { $0.asDict },
+                "steps": t.steps,
+                "think": t.think.isEmpty ? [String]() : [t.think],
                 "att": ["images": t.imageNames, "files": t.fileDicts.compactMap { $0["name"] }, "videos": t.videoNames.map { ["name": $0] }] as [String: Any]
             ] as [String: Any]
         }
@@ -725,7 +890,12 @@ struct VideoFile: Transferable {
         if let r = reuse {
             turn = r
             turn.noResultsFor = nil
+            turn.error = nil
             turn.answer = ""
+            turn.status = ""
+            turn.think = ""
+            turn.steps = []
+            turn.sources = []
             turn.done = false
         } else {
             let ready = pending.filter { $0.state == "ready" }
@@ -745,6 +915,7 @@ struct VideoFile: Transferable {
                     turn.attNames.append(a.name)
                 case .video:
                     if let id = a.videoId { turn.videoIds.append(id) }
+                    if let u = a.videoURL { turn.videoURLs.append(u) }
                     turn.videoNames.append(a.name)
                     turn.attNames.append(a.name)
                 }
@@ -776,6 +947,18 @@ struct VideoFile: Transferable {
             turn.done = true
             activeTurns.remove(turn.id)
         }
+    }
+
+    func editTurn(_ turn: ModeTurn, newText: String) async {
+        let trimmed = newText.trimmed
+        guard !trimmed.isEmpty else { return }
+        if modeBusy { stopMode() }
+        speech.stop()
+        if let idx = turns.firstIndex(where: { $0.id == turn.id }) {
+            turns = Array(turns.prefix(idx + 1))
+        }
+        turn.text = trimmed
+        await sendMode(trimmed, force: false, reuse: turn)
     }
 
     func stopMode() {
@@ -867,6 +1050,7 @@ struct VideoFile: Transferable {
         for old in pending where old.kind == .video { discard(old) }
         pending.removeAll { $0.kind == .video }
         let a = Attachment(kind: .video, name: name)
+        a.videoURL = url
         a.state = "uploading"
         a.message = "Uploading…"
         pending.append(a)
@@ -962,10 +1146,163 @@ struct VideoFile: Transferable {
     }
 }
 
-// MARK: - Answer rendering (markdown, highlights, follow-up links, rounded citation chips)
+// MARK: - Answer rendering (markdown, highlights, follow-up chips, LaTeX math, HTML preview, rounded citation chips)
+
+struct HighlightAttribute: TextAttribute {}
+
+struct HighlightTextRenderer: TextRenderer {
+    func draw(layout: Text.Layout, in ctx: inout GraphicsContext) {
+        for line in layout {
+            for run in line {
+                if run[HighlightAttribute.self] != nil {
+                    let rect = run.typographicBounds.rect.insetBy(dx: -2.5, dy: -1)
+                    ctx.fill(Path(roundedRect: rect, cornerRadius: 5, style: .continuous), with: .color(Pal.blue.opacity(0.22)))
+                }
+                ctx.draw(run)
+            }
+        }
+    }
+}
+
+enum LatexFormatter {
+    private static let symbols: [(String, String)] = [
+        ("\\alpha", "α"), ("\\beta", "β"), ("\\gamma", "γ"), ("\\delta", "δ"),
+        ("\\epsilon", "ε"), ("\\varepsilon", "ε"), ("\\zeta", "ζ"), ("\\eta", "η"),
+        ("\\theta", "θ"), ("\\iota", "ι"), ("\\kappa", "κ"), ("\\lambda", "λ"),
+        ("\\mu", "μ"), ("\\nu", "ν"), ("\\xi", "ξ"), ("\\pi", "π"),
+        ("\\rho", "ρ"), ("\\sigma", "σ"), ("\\tau", "τ"), ("\\upsilon", "υ"),
+        ("\\phi", "φ"), ("\\varphi", "φ"), ("\\chi", "χ"), ("\\psi", "ψ"), ("\\omega", "ω"),
+        ("\\Gamma", "Γ"), ("\\Delta", "Δ"), ("\\Theta", "Θ"), ("\\Lambda", "Λ"),
+        ("\\Xi", "Ξ"), ("\\Pi", "Π"), ("\\Sigma", "Σ"), ("\\Phi", "Φ"), ("\\Psi", "Ψ"), ("\\Omega", "Ω"),
+        ("\\infty", "∞"), ("\\pm", "±"), ("\\mp", "∓"), ("\\times", "×"), ("\\div", "÷"),
+        ("\\cdot", "·"), ("\\ast", "∗"), ("\\star", "⋆"), ("\\leq", "≤"), ("\\le", "≤"),
+        ("\\geq", "≥"), ("\\ge", "≥"), ("\\neq", "≠"), ("\\ne", "≠"), ("\\approx", "≈"),
+        ("\\equiv", "≡"), ("\\sim", "∼"), ("\\propto", "∝"), ("\\subset", "⊂"), ("\\subseteq", "⊆"),
+        ("\\supset", "⊃"), ("\\supseteq", "⊇"), ("\\in", "∈"), ("\\notin", "∉"),
+        ("\\cup", "∪"), ("\\cap", "∩"), ("\\emptyset", "∅"), ("\\forall", "∀"), ("\\exists", "∃"),
+        ("\\nabla", "∇"), ("\\partial", "∂"), ("\\sum", "∑"), ("\\prod", "∏"), ("\\int", "∫"),
+        ("\\oint", "∮"), ("\\rightarrow", "→"), ("\\to", "→"), ("\\leftarrow", "←"),
+        ("\\leftrightarrow", "↔"), ("\\Rightarrow", "⇒"), ("\\Leftarrow", "⇐"), ("\\Leftrightarrow", "⇔"),
+        ("\\mapsto", "↦"), ("\\degree", "°"), ("\\circ", "∘"), ("\\angle", "∠"),
+        ("\\perp", "⊥"), ("\\parallel", "∥"), ("\\therefore", "∴"), ("\\because", "∵"),
+        ("\\ldots", "…"), ("\\cdots", "⋯"), ("\\quad", " "), ("\\qquad", "  "),
+        ("\\,", " "), ("\\;", " "), ("\\:", " "), ("\\!", "")
+    ]
+
+    private static let supMap: [Character: Character] = [
+        "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+        "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", "n": "ⁿ", "i": "ⁱ", "x": "ˣ", "y": "ʸ"
+    ]
+    private static let subMap: [Character: Character] = [
+        "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
+        "+": "₊", "-": "₋", "=": "₌", "(": "₍", ")": "₎", "a": "ₐ", "e": "ₑ", "i": "ᵢ", "j": "ⱼ",
+        "k": "ₖ", "m": "ₘ", "n": "ₙ", "o": "ₒ", "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ", "v": "ᵥ", "x": "ₓ"
+    ]
+
+    static func format(_ tex: String) -> String {
+        var r = tex.trimmed
+        r = replaceCommand2(r, cmd: "frac") { a, b in "(\(a))/(\(b))" }
+        r = replaceCommand2(r, cmd: "dfrac") { a, b in "(\(a))/(\(b))" }
+        r = replaceCommand1(r, cmd: "sqrt") { a in "√(\(a))" }
+        r = replaceCommand1(r, cmd: "text") { $0 }
+        r = replaceCommand1(r, cmd: "mathrm") { $0 }
+        r = replaceCommand1(r, cmd: "mathbf") { $0 }
+        r = replaceCommand1(r, cmd: "mathit") { $0 }
+        r = replaceCommand1(r, cmd: "mathbb") { $0 }
+        r = replaceCommand1(r, cmd: "hat") { "\($0)\u{0302}" }
+        r = replaceCommand1(r, cmd: "bar") { "\($0)\u{0304}" }
+        r = replaceCommand1(r, cmd: "vec") { "\($0)⃗" }
+        r = r.replacingOccurrences(of: "\\left", with: "").replacingOccurrences(of: "\\right", with: "")
+        for (k, v) in symbols {
+            r = r.replacingOccurrences(of: k, with: v)
+        }
+        r = applyScript(r, marker: "^", map: supMap)
+        r = applyScript(r, marker: "_", map: subMap)
+        r = r.replacingOccurrences(of: "{", with: "").replacingOccurrences(of: "}", with: "")
+        return r.trimmed
+    }
+
+    private static func replaceCommand1(_ s: String, cmd: String, transform: (String) -> String) -> String {
+        var out = s
+        let needle = "\\\(cmd){"
+        while let r = out.range(of: needle) {
+            guard let end = matchingBrace(in: out, openIndex: out.index(before: r.upperBound)) else { break }
+            let inner = String(out[r.upperBound..<end])
+            out.replaceSubrange(r.lowerBound...end, with: transform(inner))
+        }
+        return out
+    }
+
+    private static func replaceCommand2(_ s: String, cmd: String, transform: (String, String) -> String) -> String {
+        var out = s
+        let needle = "\\\(cmd){"
+        while let r = out.range(of: needle) {
+            guard let end1 = matchingBrace(in: out, openIndex: out.index(before: r.upperBound)) else { break }
+            let a = String(out[r.upperBound..<end1])
+            let after1 = out.index(after: end1)
+            guard after1 < out.endIndex, out[after1] == "{",
+                  let end2 = matchingBrace(in: out, openIndex: after1) else { break }
+            let b = String(out[out.index(after: after1)..<end2])
+            out.replaceSubrange(r.lowerBound...end2, with: transform(a, b))
+        }
+        return out
+    }
+
+    private static func matchingBrace(in s: String, openIndex: String.Index) -> String.Index? {
+        var depth = 0
+        var i = openIndex
+        while i < s.endIndex {
+            if s[i] == "{" { depth += 1 }
+            else if s[i] == "}" { depth -= 1; if depth == 0 { return i } }
+            i = s.index(after: i)
+        }
+        return nil
+    }
+
+    private static func applyScript(_ s: String, marker: Character, map: [Character: Character]) -> String {
+        var out = ""
+        var i = s.startIndex
+        while i < s.endIndex {
+            let ch = s[i]
+            if ch == marker {
+                let next = s.index(after: i)
+                if next < s.endIndex {
+                    if s[next] == "{", let end = matchingBrace(in: s, openIndex: next) {
+                        let inner = s[s.index(after: next)..<end]
+                        if inner.allSatisfy({ map[$0] != nil }) {
+                            out += inner.compactMap { map[$0] }
+                        } else {
+                            out.append(marker)
+                            out += inner
+                        }
+                        i = s.index(after: end)
+                        continue
+                    } else if let mapped = map[s[next]] {
+                        out.append(mapped)
+                        i = s.index(after: next)
+                        continue
+                    }
+                }
+            }
+            out.append(ch)
+            i = s.index(after: i)
+        }
+        return out
+    }
+}
 
 enum AnswerParser {
-    enum Kind { case para, heading, bullet, number(Int), code }
+    enum Kind {
+        case para
+        case heading(Int)
+        case bullet(Int)
+        case number(Int, Int)
+        case quote
+        case divider
+        case code(String)
+        case math(String)
+        case table([[String]])
+    }
 
     struct Block: Identifiable {
         let id: Int
@@ -974,16 +1311,19 @@ enum AnswerParser {
         var raw = ""
         var cites: [Int] = []
         var chip: String?
+        var suggestChips: [String] = []
+        var tableRows: [[AttributedString]] = []
     }
 
     struct Parsed {
         var blocks: [Block] = []
-        var suggests: [String] = []
     }
 
     private static let citeRe = try! NSRegularExpression(pattern: #"\s?\[[\d\s,\[\]]*\d[\d\s,\[\]]*\]"#)
     private static let tagRe = try! NSRegularExpression(pattern: #"\[\[suggest:\s*([^\]]*?)\s*\]\]"#)
     private static let hlRe = try! NSRegularExpression(pattern: #"\[\[hl:\s*(.*?)\]\]"#, options: [.dotMatchesLineSeparators])
+    private static let blockMathRe = try! NSRegularExpression(pattern: #"(\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\])"#)
+    private static let inlineMathRe = try! NSRegularExpression(pattern: #"(?<!\\)(?:\$([^$\n]+?)\$|\\\((.+?)\\\))"#)
 
     static func parse(_ src: String, sourceCount: Int, fadeTail: Int) -> Parsed {
         var s = src.replacingOccurrences(of: "\r\n", with: "\n")
@@ -993,42 +1333,222 @@ enum AnswerParser {
         s = hlRe.stringByReplacingMatches(in: s, range: NSRange(location: 0, length: (s as NSString).length), withTemplate: "\u{E000}$1\u{E001}")
         s = s.replacingOccurrences(of: "[[hl:", with: "\u{E000}")
 
-        var items: [(Kind, String)] = []
+        var items: [Kind] = []
+        var payloads: [String] = []
+        var tableBuffers: [[[String]]] = []
         var para: [String] = []
         var code: [String] = []
+        var codeLang = ""
         var inCode = false
-        func flush() { if !para.isEmpty { items.append((.para, para.joined(separator: " "))); para = [] } }
-        for rawLine in s.components(separatedBy: "\n") {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            if line.hasPrefix("```") {
-                if inCode { items.append((.code, code.joined(separator: "\n"))); code = [] } else { flush() }
-                inCode.toggle()
-                continue
+        var mathLines: [String] = []
+        var inMath = false
+        var mathClose = "$$"
+        var quoteLines: [String] = []
+        var tableLines: [String] = []
+
+        func flushPara() {
+            if !para.isEmpty {
+                items.append(.para)
+                payloads.append(para.joined(separator: " "))
+                tableBuffers.append([])
+                para = []
             }
-            if inCode { code.append(rawLine); continue }
-            if line.isEmpty { flush(); continue }
-            if let r = line.range(of: #"^#{1,4}\s+"#, options: .regularExpression) { flush(); items.append((.heading, String(line[r.upperBound...]))); continue }
-            if let r = line.range(of: #"^[-*•]\s+"#, options: .regularExpression) { flush(); items.append((.bullet, String(line[r.upperBound...]))); continue }
-            if let r = line.range(of: #"^\d+[.)]\s+"#, options: .regularExpression) {
-                flush()
-                items.append((.number(Int(line.prefix(while: \.isNumber)) ?? 1), String(line[r.upperBound...])))
-                continue
-            }
-            para.append(line)
         }
-        if inCode && !code.isEmpty { items.append((.code, code.joined(separator: "\n"))) }
-        flush()
+        func flushQuote() {
+            if !quoteLines.isEmpty {
+                items.append(.quote)
+                payloads.append(quoteLines.joined(separator: " "))
+                tableBuffers.append([])
+                quoteLines = []
+            }
+        }
+        func flushTable() {
+            guard !tableLines.isEmpty else { return }
+            let rows: [[String]] = tableLines.compactMap { line in
+                let trimmed = line.trimmed
+                let stripped = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "|"))
+                let cells = stripped.components(separatedBy: "|").map { $0.trimmed }
+                if cells.allSatisfy({ !$0.isEmpty && $0.allSatisfy({ $0 == "-" || $0 == ":" || $0 == " " }) }) {
+                    return nil
+                }
+                return cells
+            }
+            if !rows.isEmpty {
+                items.append(.table(rows))
+                payloads.append("")
+                tableBuffers.append(rows)
+            }
+            tableLines = []
+        }
+
+        for rawLine in s.components(separatedBy: "\n") {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+
+            if inCode {
+                if trimmed.hasPrefix("```") {
+                    items.append(.code(codeLang))
+                    payloads.append(code.joined(separator: "\n"))
+                    tableBuffers.append([])
+                    code = []
+                    codeLang = ""
+                    inCode = false
+                } else {
+                    code.append(rawLine)
+                }
+                continue
+            }
+
+            if inMath {
+                if trimmed.hasSuffix(mathClose) {
+                    let body = String(trimmed.dropLast(mathClose.count)).trimmed
+                    if !body.isEmpty { mathLines.append(body) }
+                    items.append(.math(mathLines.joined(separator: "\n")))
+                    payloads.append("")
+                    tableBuffers.append([])
+                    mathLines = []
+                    inMath = false
+                } else {
+                    mathLines.append(trimmed)
+                }
+                continue
+            }
+
+            if trimmed.hasPrefix("```") {
+                flushPara(); flushQuote(); flushTable()
+                codeLang = String(trimmed.dropFirst(3)).trimmed.lowercased()
+                inCode = true
+                continue
+            }
+
+            // Single-line block math $$...$$ or \[...\]
+            if (trimmed.hasPrefix("$$") && trimmed.hasSuffix("$$") && trimmed.count > 4) ||
+               (trimmed.hasPrefix("\\[") && trimmed.hasSuffix("\\]") && trimmed.count > 4) {
+                flushPara(); flushQuote(); flushTable()
+                let inner = String(trimmed.dropFirst(2).dropLast(2)).trimmed
+                items.append(.math(inner))
+                payloads.append("")
+                tableBuffers.append([])
+                continue
+            }
+            // Multi-line block math start
+            if trimmed.hasPrefix("$$") || trimmed.hasPrefix("\\[") {
+                flushPara(); flushQuote(); flushTable()
+                mathClose = trimmed.hasPrefix("$$") ? "$$" : "\\]"
+                let first = String(trimmed.dropFirst(2)).trimmed
+                mathLines = first.isEmpty ? [] : [first]
+                inMath = true
+                continue
+            }
+
+            // Table rows
+            if trimmed.hasPrefix("|") && trimmed.contains("|") && trimmed.count >= 3 {
+                flushPara(); flushQuote()
+                tableLines.append(trimmed)
+                continue
+            } else {
+                flushTable()
+            }
+
+            // Blockquote
+            if let r = trimmed.range(of: #"^>\s?"#, options: .regularExpression) {
+                flushPara()
+                quoteLines.append(String(trimmed[r.upperBound...]))
+                continue
+            } else {
+                flushQuote()
+            }
+
+            if trimmed.isEmpty { flushPara(); continue }
+
+            // Horizontal rule
+            if trimmed.range(of: #"^([-*_])\s*\1\s*\1[\s\1]*$"#, options: .regularExpression) != nil {
+                flushPara()
+                items.append(.divider)
+                payloads.append("")
+                tableBuffers.append([])
+                continue
+            }
+
+            // Headings (1...6)
+            if let r = trimmed.range(of: #"^#{1,6}\s+"#, options: .regularExpression) {
+                flushPara()
+                let level = trimmed.prefix(while: { $0 == "#" }).count
+                items.append(.heading(level))
+                payloads.append(String(trimmed[r.upperBound...]))
+                tableBuffers.append([])
+                continue
+            }
+
+            // Leading indentation for nested lists
+            let leadingSpaces = rawLine.prefix(while: { $0 == " " || $0 == "\t" }).reduce(0) { $0 + ($1 == "\t" ? 2 : 1) }
+            let indentLevel = min(3, leadingSpaces / 2)
+
+            if let r = trimmed.range(of: #"^[-*•+]\s+"#, options: .regularExpression) {
+                flushPara()
+                items.append(.bullet(indentLevel))
+                payloads.append(String(trimmed[r.upperBound...]))
+                tableBuffers.append([])
+                continue
+            }
+            if let r = trimmed.range(of: #"^\d+[.)]\s+"#, options: .regularExpression) {
+                flushPara()
+                let n = Int(trimmed.prefix(while: \.isNumber)) ?? 1
+                items.append(.number(n, indentLevel))
+                payloads.append(String(trimmed[r.upperBound...]))
+                tableBuffers.append([])
+                continue
+            }
+
+            para.append(trimmed)
+        }
+        if inCode && !code.isEmpty {
+            items.append(.code(codeLang)); payloads.append(code.joined(separator: "\n")); tableBuffers.append([])
+        }
+        if inMath && !mathLines.isEmpty {
+            items.append(.math(mathLines.joined(separator: "\n"))); payloads.append(""); tableBuffers.append([])
+        }
+        flushTable()
+        flushQuote()
+        flushPara()
 
         var out = Parsed()
-        let lastText = items.lastIndex(where: { item in
-            if case .code = item.0 { return false }
-            return true
+        let lastText = items.lastIndex(where: { kind in
+            switch kind {
+            case .code, .math, .divider, .table: return false
+            default: return true
+            }
         })
-        for (i, it) in items.enumerated() {
-            var b = Block(id: i, kind: it.0)
-            if case .code = it.0 { b.raw = it.1; out.blocks.append(b); continue }
-            var raw = it.1
-            if case .bullet = it.0 {
+
+        for (i, kind) in items.enumerated() {
+            var b = Block(id: i, kind: kind)
+            switch kind {
+            case .code:
+                b.raw = payloads[i]
+                out.blocks.append(b)
+                continue
+            case .math(let tex):
+                b.raw = tex
+                out.blocks.append(b)
+                continue
+            case .divider:
+                out.blocks.append(b)
+                continue
+            case .table(let rows):
+                b.tableRows = rows.map { row in
+                    row.map { cell in
+                        var dummy: [String] = []
+                        let (clean, _) = extractCites(cell, count: sourceCount)
+                        return attributed(clean, suggests: &dummy, fade: 0)
+                    }
+                }
+                out.blocks.append(b)
+                continue
+            default:
+                break
+            }
+
+            var raw = payloads[i]
+            if case .bullet = kind {
                 let ns = raw as NSString
                 if let m = tagRe.firstMatch(in: raw, range: NSRange(location: 0, length: ns.length)), m.range.location == 0 {
                     b.chip = ns.substring(with: m.range(at: 1))
@@ -1037,7 +1557,9 @@ enum AnswerParser {
             }
             let (clean, cites) = extractCites(raw, count: sourceCount)
             b.cites = cites
-            b.text = attributed(clean, suggests: &out.suggests, fade: i == lastText ? fadeTail : 0)
+            var suggests: [String] = []
+            b.text = attributed(clean, suggests: &suggests, fade: i == lastText ? fadeTail : 0)
+            b.suggestChips = suggests
             out.blocks.append(b)
         }
         return out
@@ -1057,21 +1579,32 @@ enum AnswerParser {
         return (ms as String, cites)
     }
 
+    private static func replaceInlineMath(_ s: String) -> String {
+        let ns = s as NSString
+        let ms = NSMutableString(string: s)
+        for m in inlineMathRe.matches(in: s, range: NSRange(location: 0, length: ns.length)).reversed() {
+            let r1 = m.range(at: 1)
+            let r2 = m.range(at: 2)
+            let inner = r1.location != NSNotFound ? ns.substring(with: r1) : ns.substring(with: r2)
+            ms.replaceCharacters(in: m.range, with: LatexFormatter.format(inner))
+        }
+        return ms as String
+    }
+
     private static func attributed(_ s: String, suggests: inout [String], fade: Int) -> AttributedString {
-        // inline follow-up tags become pressable links
-        var withLinks = ""
+        // Extract all [[suggest: ...]] tags into chips so every follow-up renders consistently
+        var stripped = ""
         let ns = s as NSString
         var last = 0
         for m in tagRe.matches(in: s, range: NSRange(location: 0, length: ns.length)) {
-            withLinks += ns.substring(with: NSRange(location: last, length: m.range.location - last))
-            let t = ns.substring(with: m.range(at: 1))
-            withLinks += "[↳ \(t)](gsuggest://s\(suggests.count))"
-            suggests.append(t)
+            stripped += ns.substring(with: NSRange(location: last, length: m.range.location - last))
+            let t = ns.substring(with: m.range(at: 1)).trimmed
+            if !t.isEmpty { suggests.append(t) }
             last = m.range.location + m.range.length
         }
-        withLinks += ns.substring(from: last)
+        stripped += ns.substring(from: last)
+        stripped = replaceInlineMath(stripped).trimmed
 
-        // markdown per segment, highlighted segments get a background
         let opts = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         var out = AttributedString()
         var hl = false
@@ -1079,22 +1612,17 @@ enum AnswerParser {
         func flush() {
             guard !buf.isEmpty else { return }
             var seg = (try? AttributedString(markdown: buf, options: opts)) ?? AttributedString(buf)
-            if hl { seg.backgroundColor = Pal.yellow.opacity(0.35) }
+            if hl { seg[HighlightAttribute.self] = HighlightAttribute() }
             out.append(seg)
             buf = ""
         }
-        for ch in withLinks {
+        for ch in stripped {
             if ch == "\u{E000}" { flush(); hl = true }
             else if ch == "\u{E001}" { flush(); hl = false }
             else { buf.append(ch) }
         }
         flush()
 
-        for run in out.runs {
-            if let l = run.link, l.scheme == "gsuggest" { out[run.range].foregroundColor = Pal.blue }
-        }
-
-        // the newest characters fade in
         if fade > 0 {
             let total = out.characters.count
             for k in 0..<min(fade, total) {
@@ -1108,11 +1636,79 @@ enum AnswerParser {
     }
 }
 
+struct CodeBlockView: View {
+    let lang: String
+    let raw: String
+    @State private var showPreview = true
+    @State private var webHeight: CGFloat = 220
+    @State private var fullScreen = false
+
+    private var isHTML: Bool {
+        if ["html", "htm", "svg"].contains(lang) { return true }
+        let l = raw.trimmed.lowercased()
+        return l.hasPrefix("<!doctype") || l.hasPrefix("<html") || l.hasPrefix("<svg") || (l.contains("<div") && l.contains("</div>"))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if isHTML {
+                HStack(spacing: 8) {
+                    Picker("View", selection: $showPreview) {
+                        Text("Preview").tag(true)
+                        Text("Code").tag(false)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 150)
+                    Spacer()
+                    Button { fullScreen = true } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.caption.weight(.semibold))
+                            .padding(6)
+                    }
+                    .buttonStyle(.plain)
+                }
+                if showPreview {
+                    HTMLPreviewView(html: raw, height: $webHeight)
+                        .frame(height: webHeight)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                } else {
+                    codeScroll
+                }
+            } else {
+                codeScroll
+            }
+        }
+        .padding(10)
+        .glassEffect(.regular, in: .rect(cornerRadius: 14))
+        .sheet(isPresented: $fullScreen) {
+            NavigationStack {
+                HTMLPreviewView(html: raw, height: .constant(600))
+                    .ignoresSafeArea(edges: .bottom)
+                    .navigationTitle("HTML Preview")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) { Button("Done") { fullScreen = false } }
+                    }
+            }
+        }
+    }
+
+    private var codeScroll: some View {
+        ScrollView(.horizontal) {
+            Text(raw)
+                .font(.system(.footnote, design: .monospaced))
+                .padding(4)
+                .textSelection(.enabled)
+        }
+    }
+}
+
 struct MarkdownView: View {
     let text: String
     let sources: [Hit]
     var fading = false
     var onSuggest: ((String) -> Void)?
+    @Environment(\.openURL) private var parentOpenURL
 
     var body: some View {
         let parsed = AnswerParser.parse(text, sourceCount: sources.count, fadeTail: fading ? 16 : 0)
@@ -1123,46 +1719,104 @@ struct MarkdownView: View {
         .lineSpacing(3)
         .frame(maxWidth: .infinity, alignment: .leading)
         .environment(\.openURL, OpenURLAction { url in
-            if url.scheme == "gsuggest", let h = url.host, h.hasPrefix("s"), let i = Int(h.dropFirst()), i < parsed.suggests.count {
-                onSuggest?(parsed.suggests[i])
-                return .handled
-            }
-            return .systemAction
+            parentOpenURL(url)
+            return .handled
         })
     }
 
     @ViewBuilder private func blockView(_ b: AnswerParser.Block) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             switch b.kind {
-            case .code:
-                ScrollView(.horizontal) { Text(b.raw).font(.system(.footnote, design: .monospaced)).padding(12) }
-                    .glassEffect(.regular, in: .rect(cornerRadius: 14))
-            case .heading:
-                Text(b.text).font(.headline)
-            case .para:
+            case .code(let lang):
+                CodeBlockView(lang: lang, raw: b.raw)
+            case .math(let tex):
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Text(LatexFormatter.format(tex))
+                        .font(.system(.body, design: .serif))
+                        .italic()
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .textSelection(.enabled)
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+                .glassEffect(.regular, in: .rect(cornerRadius: 14))
+            case .divider:
+                Divider().padding(.vertical, 4)
+            case .heading(let level):
                 Text(b.text)
-            case .bullet:
+                    .font(level <= 2 ? .headline : .subheadline.weight(.semibold))
+                    .textRenderer(HighlightTextRenderer())
+            case .para:
+                if !b.text.characters.isEmpty {
+                    Text(b.text).textRenderer(HighlightTextRenderer())
+                }
+            case .quote:
+                HStack(alignment: .top, spacing: 10) {
+                    RoundedRectangle(cornerRadius: 2).fill(Pal.blue.opacity(0.65)).frame(width: 3)
+                    Text(b.text).foregroundStyle(.secondary).textRenderer(HighlightTextRenderer())
+                }
+                .padding(.vertical, 2)
+            case .bullet(let indent):
                 if let chip = b.chip {
                     VStack(alignment: .leading, spacing: 4) {
-                        Button { onSuggest?(chip) } label: {
-                            Label(chip, systemImage: "arrow.turn.down.right")
-                                .font(.subheadline)
-                                .multilineTextAlignment(.leading)
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 9)
-                                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 18))
+                        suggestChip(chip)
+                        if !b.text.characters.isEmpty {
+                            Text(b.text).font(.footnote).foregroundStyle(.secondary).textRenderer(HighlightTextRenderer())
                         }
-                        .buttonStyle(.plain)
-                        if !b.text.characters.isEmpty { Text(b.text).font(.footnote).foregroundStyle(.secondary) }
                     }
+                    .padding(.leading, CGFloat(indent) * 14)
                 } else {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) { Text("•"); Text(b.text) }
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(indent > 0 ? "◦" : "•")
+                        Text(b.text).textRenderer(HighlightTextRenderer())
+                    }
+                    .padding(.leading, CGFloat(indent) * 14)
                 }
-            case .number(let n):
-                HStack(alignment: .firstTextBaseline, spacing: 8) { Text("\(n).").monospacedDigit(); Text(b.text) }
+            case .number(let n, let indent):
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("\(n).").monospacedDigit()
+                    Text(b.text).textRenderer(HighlightTextRenderer())
+                }
+                .padding(.leading, CGFloat(indent) * 14)
+            case .table:
+                ScrollView(.horizontal, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(b.tableRows.enumerated()), id: \.offset) { rIdx, row in
+                            HStack(spacing: 0) {
+                                ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
+                                    Text(cell)
+                                        .font(rIdx == 0 ? .footnote.weight(.semibold) : .footnote)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 7)
+                                        .frame(minWidth: 90, alignment: .leading)
+                                }
+                            }
+                            .background(rIdx == 0 ? Pal.blue.opacity(0.12) : Color.clear)
+                            if rIdx < b.tableRows.count - 1 { Divider() }
+                        }
+                    }
+                }
+                .glassEffect(.regular, in: .rect(cornerRadius: 14))
+            }
+            if !b.suggestChips.isEmpty {
+                FlowLayout(spacing: 8) {
+                    ForEach(b.suggestChips, id: \.self) { s in suggestChip(s) }
+                }
             }
             if !b.cites.isEmpty { CiteRow(cites: b.cites, sources: sources) }
         }
+    }
+
+    private func suggestChip(_ label: String) -> some View {
+        Button { onSuggest?(label) } label: {
+            Label(label, systemImage: "arrow.turn.down.right")
+                .font(.subheadline)
+                .multilineTextAlignment(.leading)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 18))
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -1263,6 +1917,17 @@ struct RootView: View {
         }
         .animation(.smooth(duration: 0.3), value: app.connected)
         .animation(.smooth(duration: 0.25), value: app.notice)
+        .environment(\.openURL, OpenURLAction { url in
+            if let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+                app.openedURL = IdentifiableURL(url: url)
+                return .handled
+            }
+            return .systemAction
+        })
+        .sheet(item: $app.openedURL) { item in
+            SafariSheet(url: item.url)
+                .ignoresSafeArea()
+        }
     }
 }
 
@@ -2032,10 +2697,14 @@ struct AIModeRoot: View {
                                     trailingToolbar
                                 }
                         }
+                        .background(AmbientBackground())
+                        .clipShape(RoundedRectangle(cornerRadius: 46 * progress, style: .continuous))
+                        .shadow(color: .black.opacity(0.25 * progress), radius: 20, x: -6, y: 0)
                         .offset(x: offset)
                         .overlay {
                             if offset > 0 {
                                 Color.black.opacity(0.28 * progress)
+                                    .clipShape(RoundedRectangle(cornerRadius: 46 * progress, style: .continuous))
                                     .ignoresSafeArea()
                                     .offset(x: offset)
                                     .onTapGesture { setSidebar(false) }
@@ -2174,12 +2843,14 @@ struct HistoryList: View {
 
 struct ChatView: View {
     @Environment(AppModel.self) private var app
+    @State private var userScrolled = false
+
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 22) {
+                VStack(alignment: .leading, spacing: 22) {
                     if app.turns.isEmpty { EmptyChat() }
-                    ForEach(app.turns) { t in TurnView(turn: t) }
+                    ForEach(app.turns) { t in TurnView(turn: t).id(t.id) }
                     Color.clear.frame(height: 8).id("end")
                 }
                 .padding(.horizontal, 16)
@@ -2187,9 +2858,20 @@ struct ChatView: View {
                 .readableWidth(760)
             }
             .scrollDismissesKeyboard(.interactively)
-            .onChange(of: app.turns.last?.answer) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
-            .onChange(of: app.turns.count) { _, _ in withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
-            .onChange(of: app.chatId) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
+            .simultaneousGesture(DragGesture().onChanged { _ in userScrolled = true })
+            .onChange(of: app.turns.count) { _, _ in
+                userScrolled = false
+                withAnimation { proxy.scrollTo("end", anchor: .bottom) }
+            }
+            .onChange(of: app.chatId) { _, _ in
+                userScrolled = false
+                proxy.scrollTo("end", anchor: .bottom)
+            }
+            .onChange(of: app.turns.last?.done) { _, done in
+                if done == true && !userScrolled {
+                    withAnimation { proxy.scrollTo("end", anchor: .bottom) }
+                }
+            }
             .safeAreaInset(edge: .bottom) {
                 ChatInputBar()
                     .readableWidth(760)
@@ -2228,6 +2910,9 @@ struct EmptyChat: View {
 struct TurnView: View {
     @Environment(AppModel.self) private var app
     let turn: ModeTurn
+    @State private var editing = false
+    @State private var draftText = ""
+    @State private var playingVideo: IdentifiableURL?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -2244,16 +2929,49 @@ struct TurnView: View {
                     }
                     if !turn.attNames.isEmpty {
                         FlowLayout(spacing: 6) {
-                            ForEach(turn.attNames, id: \.self) { n in
-                                Label(n, systemImage: "paperclip").font(.caption).lineLimit(1)
-                                    .padding(.horizontal, 10).padding(.vertical, 5)
-                                    .glassEffect(.regular, in: .capsule)
+                            ForEach(Array(turn.attNames.enumerated()), id: \.offset) { _, n in
+                                if let vIdx = turn.videoNames.firstIndex(of: n), vIdx < turn.videoURLs.count {
+                                    Button { playingVideo = IdentifiableURL(url: turn.videoURLs[vIdx]) } label: {
+                                        Label(n, systemImage: "play.circle.fill").font(.caption).lineLimit(1)
+                                            .padding(.horizontal, 10).padding(.vertical, 5)
+                                            .glassEffect(.regular.interactive(), in: .capsule)
+                                    }
+                                    .buttonStyle(.plain)
+                                } else {
+                                    Label(n, systemImage: "paperclip").font(.caption).lineLimit(1)
+                                        .padding(.horizontal, 10).padding(.vertical, 5)
+                                        .glassEffect(.regular, in: .capsule)
+                                }
                             }
                         }
                     }
-                    Text(turn.text)
-                        .padding(.horizontal, 16).padding(.vertical, 10)
-                        .glassEffect(.regular.tint(Pal.blue.opacity(0.3)), in: .rect(cornerRadius: 22))
+                    if editing {
+                        VStack(alignment: .trailing, spacing: 8) {
+                            TextField("Edit message", text: $draftText, axis: .vertical)
+                                .lineLimit(1...6)
+                                .padding(.horizontal, 14).padding(.vertical, 10)
+                                .glassEffect(.regular.tint(Pal.blue.opacity(0.2)), in: .rect(cornerRadius: 18))
+                            HStack(spacing: 8) {
+                                Button("Cancel") { editing = false }
+                                    .buttonStyle(.glass).controlSize(.small)
+                                Button("Send") {
+                                    let t = draftText
+                                    editing = false
+                                    Task { await app.editTurn(turn, newText: t) }
+                                }
+                                .buttonStyle(.glassProminent).tint(Pal.blue).controlSize(.small)
+                                .disabled(draftText.trimmed.isEmpty)
+                            }
+                        }
+                    } else {
+                        Text(turn.text)
+                            .padding(.horizontal, 16).padding(.vertical, 10)
+                            .glassEffect(.regular.tint(Pal.blue.opacity(0.3)), in: .rect(cornerRadius: 22))
+                            .contextMenu {
+                                Button("Edit", systemImage: "pencil") { draftText = turn.text; editing = true }
+                                Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = turn.text; app.flash("Copied") }
+                            }
+                    }
                 }
             }
 
@@ -2287,16 +3005,49 @@ struct TurnView: View {
                         }
                     }
                 }
-                if turn.done && !turn.answer.isEmpty {
-                    Button { UIPasteboard.general.string = turn.answer; app.flash("Copied") } label: {
-                        Image(systemName: "doc.on.doc").font(.footnote).foregroundStyle(.secondary)
+                if turn.done {
+                    HStack(spacing: 16) {
+                        if !turn.answer.isEmpty {
+                            Button { UIPasteboard.general.string = turn.answer; app.flash("Copied") } label: {
+                                Image(systemName: "doc.on.doc").font(.footnote).foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+
+                            Button { app.speech.toggle(turnId: turn.id, text: turn.answer) } label: {
+                                Image(systemName: app.speech.speakingTurnId == turn.id ? "stop.circle.fill" : "speaker.wave.2")
+                                    .font(.footnote)
+                                    .foregroundStyle(app.speech.speakingTurnId == turn.id ? Pal.blue : .secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        Menu {
+                            Button("Retry", systemImage: "arrow.clockwise") {
+                                Task { await app.sendMode(turn.text, force: false, reuse: turn) }
+                            }
+                            Button("Retry without searching", systemImage: "bolt.slash") {
+                                Task { await app.sendMode(turn.text, force: true, reuse: turn) }
+                            }
+                            if !turn.answer.isEmpty {
+                                Button("Copy response", systemImage: "doc.on.doc") {
+                                    UIPasteboard.general.string = turn.answer; app.flash("Copied")
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis").font(.footnote).foregroundStyle(.secondary)
+                                .padding(.vertical, 4).padding(.horizontal, 6)
+                        }
+                        .menuIndicator(.hidden)
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
             .glassEffect(.regular, in: .rect(cornerRadius: 26))
+        }
+        .sheet(item: $playingVideo) { item in
+            VideoPlayerSheet(url: item.url)
         }
     }
 }
@@ -2412,12 +3163,19 @@ struct ChatInputBar: View {
 struct AttachChip: View {
     let att: Attachment
     @Environment(AppModel.self) private var app
+    @State private var playingVideo: IdentifiableURL?
     var body: some View {
         HStack(spacing: 8) {
-            if let t = att.thumb {
-                Image(uiImage: t).resizable().scaledToFill().frame(width: 30, height: 30).clipShape(RoundedRectangle(cornerRadius: 8))
-            } else {
-                Image(systemName: att.kind == .video ? "film" : "doc.text").frame(width: 30, height: 30)
+            Group {
+                if let t = att.thumb {
+                    Image(uiImage: t).resizable().scaledToFill().frame(width: 30, height: 30).clipShape(RoundedRectangle(cornerRadius: 8))
+                } else if att.kind == .video, let u = att.videoURL {
+                    Button { playingVideo = IdentifiableURL(url: u) } label: {
+                        Image(systemName: "play.circle.fill").foregroundStyle(Pal.blue).frame(width: 30, height: 30)
+                    }.buttonStyle(.plain)
+                } else {
+                    Image(systemName: att.kind == .video ? "film" : "doc.text").frame(width: 30, height: 30)
+                }
             }
             VStack(alignment: .leading, spacing: 1) {
                 Text(att.name).font(.caption.weight(.medium)).lineLimit(1)
@@ -2435,5 +3193,8 @@ struct AttachChip: View {
         .padding(.vertical, 6)
         .frame(maxWidth: 260)
         .glassEffect(.regular, in: .capsule)
+        .sheet(item: $playingVideo) { item in
+            VideoPlayerSheet(url: item.url)
+        }
     }
 }
