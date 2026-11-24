@@ -7377,3 +7377,28 @@ struct ArtifactCard: View {
         }
     }
 }
+
+struct WorkspaceCommandBlock: View {
+    let code: String
+    let open: Bool
+    @State private var expanded = false
+
+    var body: some View {
+        if open {
+            HStack(spacing: 8) {
+                ThinkingDots()
+                Text("Generating Command").font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+        } else {
+            DisclosureGroup("Run Command", isExpanded: $expanded) {
+                CodeBlock(lang: "python", code: code, open: false, note: nil)
+                    .padding(.top, 6)
+            }
+            .font(.subheadline.weight(.medium))
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+        }
+    }
+}
