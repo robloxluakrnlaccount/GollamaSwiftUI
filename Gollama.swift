@@ -7285,9 +7285,13 @@ struct ArtifactCard: View {
                 if isText {
                     Button(isHTML ? "View / Run" : "View") {
                         Task {
-                            if textPreview == nil, let u = exportedURL ?? (await app.downloadArtifact(filename)) {
-                                exportedURL = u
-                                textPreview = try? String(contentsOf: u, encoding: .utf8)
+                            if textPreview == nil {
+                                if exportedURL == nil {
+                                    exportedURL = await app.downloadArtifact(filename)
+                                }
+                                if let u = exportedURL {
+                                    textPreview = try? String(contentsOf: u, encoding: .utf8)
+                                }
                             }
                             if textPreview != nil { showPreview = true }
                         }
