@@ -380,6 +380,7 @@ enum AttachKind { case image, file, video }
     let name: String
     var b64 = ""
     var text = ""
+    var size = 0
     var videoId: String?
     var state = "ready"          // ready | uploading | processing | error
     var progress = 0.0
@@ -405,7 +406,7 @@ enum AttachKind { case image, file, video }
     var thumbs: [UIImage] = []
     var imagesB64: [String] = []
     var imageNames: [String] = []
-    var fileDicts: [[String: String]] = []
+    var fileDicts: [[String: Any]] = []
     var videos: [VideoRef] = []
     init(id: Int, text: String) { self.id = id; self.text = text }
 }
@@ -1404,7 +1405,7 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
                     turn.imageNames.append(a.name)
                     if let t = a.thumb { turn.thumbs.append(t) }
                 case .file:
-                    turn.fileDicts.append(["name": a.name, "text": a.text])
+                    turn.fileDicts.append(["name": a.name, "text": a.text, "size": a.size])
                     turn.attNames.append(a.name)
                 case .video:
                     if let id = a.videoId { turn.videos.append(VideoRef(id: id, name: a.name, url: a.localURL, thumb: a.thumb)) }
@@ -1425,8 +1426,9 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
             history.append(m)
             history.append(["role": "assistant", "content": t.answer])
         }
+        ensureChat()
         let attach: [String: Any] = [
-            "images": turn.imagesB64, "image_names": turn.imageNames, "files": turn.fileDicts,
+            "chat_id": chatId ?? "", "images": turn.imagesB64, "image_names": turn.imageNames, "files": turn.fileDicts,
             "videos": turn.videos.map { $0.id }, "temp": false, "project": NSNull()
         ]
         activeTurns.insert(turn.id)
@@ -1562,14 +1564,34 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         } else if type?.conforms(to: .image) == true {
             if let d = try? Data(contentsOf: url) { addImage(data: d, name: url.lastPathComponent) }
         } else if let d = try? Data(contentsOf: url) {
-            let head = d.prefix(60_000)
-            var text: String?
-            for cut in 0...3 where text == nil { text = String(data: head.dropLast(cut), encoding: .utf8) }
-            guard let t = text else { flash(String(format: tr("%@ isn't a text file."), url.lastPathComponent)); return }
+            guard d.count <= 100 * 1024 * 1024 else { flash(tr("File is larger than 100 MB.")); return }
+            ensureChat()
             let a = Attachment(kind: .file, name: url.lastPathComponent)
-            a.text = String(t.prefix(20000))
+            a.size = d.count
+            if d.count <= 200_000 {
+                let head = d.prefix(60_000)
+                var text: String?
+                for cut in 0...3 where text == nil { text = String(data: head.dropLast(cut), encoding: .utf8) }
+                if let t = text { a.text = String(t.prefix(20000)) }
+            }
+            if let c = client, let cid = chatId {
+                _ = try? await c.call("artifact_upload", [cid, url.lastPathComponent, d.base64EncodedString()])
+            }
             pending.append(a)
         }
+    }
+
+    func downloadArtifact(_ name: String) async -> URL? {
+        guard let c = client, let cid = chatId else { return nil }
+        guard let r = try? await c.call("artifact_download", [cid, name]) as? [String: Any],
+              r["ok"] as? Bool == true,
+              let dataUrl = r["url"] as? String,
+              let comma = dataUrl.firstIndex(of: ","),
+              let data = Data(base64Encoded: String(dataUrl[dataUrl.index(after: comma)...])) else { return nil }
+        let safe = (r["name"] as? String) ?? name
+        let dst = FileManager.default.temporaryDirectory.appendingPathComponent(safe)
+        try? data.write(to: dst)
+        return dst
     }
 
     func addVideo(url: URL, name: String) async {
@@ -1771,7 +1793,7 @@ struct PronCard: Hashable {
 }
 
 struct ABlock: Identifiable {
-    enum Kind { case para, heading, item, quote, table, rule, code, live, math, image, pron }
+    enum Kind { case para, heading, item, quote, table, rule, code, live, math, image, pron, artifact }
     let id: Int
     var kind: Kind
     var level = 0
@@ -1810,6 +1832,7 @@ enum AnswerParser {
         var labels: [String] = []
         var maths: [String] = []
         var prons: [PronCard] = []
+        var artifacts: [String] = []
         var hl = 0
         let sourceCount: Int
         init(_ n: Int) { sourceCount = n }
@@ -1835,6 +1858,8 @@ enum AnswerParser {
     private static let reImageTag = rxc(#"\[image:\s*[^\]]{2,100}\]"#, [.caseInsensitive])
     private static let rePronTag = rxc(#"\[\[\s*pronounce\s*:\s*([^\]]{2,2500})\]\]"#, [.caseInsensitive])
     private static let rePronLine = rxc("^\u{E040}(\\d+)\u{E041}$")
+    private static let reArtifactTag = rxc(#"\[\[\s*artifact\s*:\s*([^\]]{1,200})\]\]"#, [.caseInsensitive])
+    private static let reArtifactLine = rxc("^\u{E042}(\\d+)\u{E043}$")
     private static let reWrapTag = rxc(#"\[\s*(\[{2,3}\s*(?:suggest(?:ion)?|ask|say|reply)\s*:[^\]]*\]{2,3})\s*\]"#, [.caseInsensitive])
     private static let reSugg = rxc(#"\[{2,3}\s*(?:suggest(?:ion)?|ask|say|reply)\s*:\s*([^\]]{2,500})\]{2,3}|\[\s*suggest(?:ion)?\s*:\s*([^\]\[]{2,500})\]"#, [.caseInsensitive])
     private static let reCodeSpan = rxc("`[^`\\n]*`")
@@ -1995,6 +2020,12 @@ enum AnswerParser {
             c.prons.append(card)
             return "\n\u{E040}\(c.prons.count - 1)\u{E041}\n"
         }
+        s = replaceMatches(reArtifactTag, in: s) { m, ns in
+            let name = (grp(m, ns, 1) ?? "").trimmed
+            guard !name.isEmpty else { return "" }
+            c.artifacts.append(name)
+            return "\n\u{E042}\(c.artifacts.count - 1)\u{E043}\n"
+        }
 
         // follow-ups: [[suggest: ...]] (also suggestion / ask / say / reply, 2-3 brackets, wrapped or single-bracket)
         s = sub(reWrapTag, s, "$1")
@@ -2116,6 +2147,18 @@ enum AnswerParser {
                 if idx < c.prons.count {
                     var d = Draft(kind: .pron)
                     d.pron = c.prons[idx]
+                    out.append(d)
+                }
+                i += 1
+                continue
+            }
+            if let m = reArtifactLine.firstMatch(in: t, range: NSRange(location: 0, length: tns.length)) {
+                flush()
+                stack = []
+                let idx = Int(tns.substring(with: m.range(at: 1))) ?? 0
+                if idx < c.artifacts.count {
+                    var d = Draft(kind: .artifact)
+                    d.raw = c.artifacts[idx]
                     out.append(d)
                 }
                 i += 1
@@ -2712,6 +2755,8 @@ struct BlockView: View {
                 CodeBlock(lang: b.lang, code: b.raw, open: b.open, note: b.marker == "run" ? "This Python block runs in the web app. Here it's shown as code." : nil)
             case .pron:
                 if let p = b.pron { PronunciationCard(card: p, onSuggest: onSuggest) }
+            case .artifact:
+                ArtifactCard(filename: b.raw)
             case .image:
                 AsyncImage(url: URL(string: b.raw)) { p in
                     if let i = p.image { i.resizable().scaledToFit() }
@@ -4329,7 +4374,7 @@ struct ChatInputBar: View {
     @State private var photoItems: [PhotosPickerItem] = []
     @FocusState private var focused: Bool
 
-    private static let fileTypes: [UTType] = [.plainText, .text, .json, .xml, .sourceCode, .commaSeparatedText, .html, .movie, .image]
+    private static let fileTypes: [UTType] = [.item]
 
     private var uploading: Bool { app.pending.contains { $0.state == "uploading" || $0.state == "processing" } }
     private var canSend: Bool { !uploading && (!text.trimmed.isEmpty || app.pending.contains { $0.state == "ready" }) }
@@ -7204,4 +7249,54 @@ enum L10n {
         "New suggestions on every launch": "Nové návrhy při každém spuštění",
         "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "Při každém otevření aplikace vytvoří nové návrhy na úvodní stránce. Vypnutím zachováte stejné. Vyžaduje zapnuté osobní návrhy v nastavení serveru."
     ]
+}
+struct ArtifactCard: View {
+    @Environment(AppModel.self) private var app
+    let filename: String
+    @State private var loading = false
+    @State private var exportedURL: URL?
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "doc.fill")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(Pal.blue)
+                .frame(width: 36, height: 36)
+                .background(Pal.blue.opacity(0.14), in: RoundedRectangle(cornerRadius: 10))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(filename).font(.subheadline.weight(.medium)).lineLimit(1)
+                Text("Artifact file").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            if let u = exportedURL {
+                ShareLink(item: u) {
+                    Label("Save", systemImage: "square.and.arrow.up")
+                        .font(.subheadline.weight(.medium))
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(Pal.blue.opacity(0.15), in: Capsule())
+                }
+            } else {
+                Button {
+                    guard !loading else { return }
+                    loading = true
+                    Task {
+                        exportedURL = await app.downloadArtifact(filename)
+                        loading = false
+                    }
+                } label: {
+                    if loading {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text("Download")
+                            .font(.subheadline.weight(.medium))
+                            .padding(.horizontal, 12).padding(.vertical, 6)
+                            .background(Pal.blue.opacity(0.15), in: Capsule())
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(12)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
+    }
 }
