@@ -2520,6 +2520,7 @@ struct RootView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.horizontalSizeClass) private var hSize
     @State private var drag: CGFloat = 0
+    @GestureState private var dragging = false
     @State private var width: CGFloat = 390
 
     private var compact: Bool { hSize != .regular }
@@ -2541,6 +2542,7 @@ struct RootView: View {
                         .offset(x: -(1 - progress) * 60)
                         .opacity(progress > 0 ? 1 : 0)
                         .allowsHitTesting(progress > 0.9)
+                        .zIndex(progress > 0.99 ? 2 : 0)
                 }
                 // the whole app slides over like a card, and the card is rounded to the device's corners while the sidebar is open
                 TabView(selection: $app.mainTab) {
@@ -2552,20 +2554,35 @@ struct RootView: View {
                 .overlay {
                     if progress > 0 {
                         Color.black.opacity(0.14 * progress)
-                            .contentShape(Rectangle())
-                            .onTapGesture { app.closeSidebar() }
-                            .gesture(sidebarDrag)
+                            .allowsHitTesting(false)
                     }
                 }
                 .modifier(ConcentricCardMask(progress: progress))
                 .shadow(color: .black.opacity(0.28 * progress), radius: 24, x: -6)
+                .allowsHitTesting(progress == 0)
                 .offset(x: progress * drawerW)
                 .transition(.opacity)
+                // Tap / swipe-to-close layer over the card. It's a plain view that sits beside the drawer, so it moves
+                // with the card, and it stays alive for as long as the sidebar is marked open (even at progress 0),
+                // so a closing drag can never leave the sidebar "open" but invisible.
+                if compact, app.sidebarOpen || drag != 0 {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .offset(x: progress * drawerW)
+                        .onTapGesture { app.closeSidebar() }
+                        .gesture(sidebarDrag)
+                }
             } else {
                 ConnectScreen().transition(.opacity)
             }
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+        .onChange(of: dragging) { _, isDragging in
+            if !isDragging, drag != 0 { settle(momentum: 0) }
+        }
+        .onChange(of: app.sidebarOpen) { _, _ in
+            if !dragging { drag = 0 }
+        }
         // The drag lives on a thin strip along the left edge (closed) or on the scrim over the card (open),
         // not on the whole screen. A screen-wide DragGesture makes UIKit cancel touches in segmented controls
         // and sliders as soon as the drag starts, which is what killed dragging between segments.
@@ -2606,6 +2623,7 @@ struct RootView: View {
     /// Swipe from the left edge strip to open the sidebar, swipe left on the card to close it. Only on the AI Mode tab.
     private var sidebarDrag: some Gesture {
         DragGesture(minimumDistance: 14, coordinateSpace: .global)
+            .updating($dragging) { _, state, _ in state = true }
             .onChanged { v in
                 guard compact, app.connected else { return }
                 guard abs(v.translation.width) > abs(v.translation.height) * 1.2 else { return }
@@ -2617,15 +2635,19 @@ struct RootView: View {
             }
             .onEnded { v in
                 guard drag != 0 else { return }
-                let base: CGFloat = app.sidebarOpen ? drawerW : 0
-                let momentum = (v.predictedEndTranslation.width - v.translation.width) * 0.25
-                let open = base + drag + momentum > drawerW * 0.5
-                if open { hideKeyboard() }
-                withAnimation(.smooth(duration: 0.3)) {
-                    app.sidebarOpen = open
-                    drag = 0
-                }
+                settle(momentum: (v.predictedEndTranslation.width - v.translation.width) * 0.25)
             }
+    }
+
+    /// Snaps the sidebar fully open or closed from wherever the drag left it.
+    private func settle(momentum: CGFloat) {
+        let base: CGFloat = app.sidebarOpen ? drawerW : 0
+        let open = base + drag + momentum > drawerW * 0.5
+        if open { hideKeyboard() }
+        withAnimation(.smooth(duration: 0.3)) {
+            app.sidebarOpen = open
+            drag = 0
+        }
     }
 }
 
