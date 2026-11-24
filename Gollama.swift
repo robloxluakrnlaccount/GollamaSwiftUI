@@ -866,6 +866,16 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
     var loadingNews = false
     var imagesError: String?
     var newsError: String?
+    // endless scrolling: each extra batch is just "the next page" request to the server
+    var resultsPage = 1
+    var hasMoreResults = false
+    var loadingMoreResults = false
+    var imagesPage = 1
+    var hasMoreImages = false
+    var loadingMoreImages = false
+    var newsPage = 1
+    var hasMoreNews = false
+    var loadingMoreNews = false
     var recents: [String] = UserDefaults.standard.stringArray(forKey: "gollama.recents") ?? []
     var suggestions: [Suggestion] = []
 
@@ -996,6 +1006,9 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         overview = Overview()
         images = []
         news = []
+        hasMoreResults = false
+        hasMoreImages = false
+        hasMoreNews = false
         searchTab = .all
         searchError = nil
         corrected = nil
@@ -1028,6 +1041,9 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         news = []
         imagesError = nil
         newsError = nil
+        hasMoreResults = false
+        hasMoreImages = false
+        hasMoreNews = false
         switch searchTab {
         case .all: Task { await runSearch(q, nocorrect: nocorrect) }
         case .images: Task { await loadImages() }
@@ -1054,6 +1070,8 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         do {
             let r = try await c.call("search_corrected", [q, nocorrect]) as? [String: Any] ?? [:]
             results = Hit.list(r["results"])
+            resultsPage = 1
+            hasMoreResults = !results.isEmpty
             corrected = r["corrected"] as? String
             original = r["original"] as? String ?? q
             if let used = r["query"] as? String { query = used }
@@ -1078,11 +1096,73 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         do {
             let r = try await c.call("search_images", [query]) as? [String: Any] ?? [:]
             imagesError = r["error"] as? String
-            images = (r["items"] as? [[String: Any]] ?? []).map {
-                ImageItem(thumb: ($0["thumb"] as? String).flatMap(URL.init), full: ($0["image"] as? String).flatMap(URL.init),
-                          page: $0["url"] as? String ?? "", title: $0["title"] as? String ?? "", source: $0["source"] as? String ?? "")
-            }
+            images = Self.imageItems(r["items"])
+            imagesPage = 1
+            hasMoreImages = !images.isEmpty
         } catch { imagesError = error.localizedDescription }
+    }
+
+    private static func imageItems(_ any: Any?) -> [ImageItem] {
+        (any as? [[String: Any]] ?? []).map {
+            ImageItem(thumb: ($0["thumb"] as? String).flatMap(URL.init), full: ($0["image"] as? String).flatMap(URL.init),
+                      page: $0["url"] as? String ?? "", title: $0["title"] as? String ?? "", source: $0["source"] as? String ?? "")
+        }
+    }
+
+    private static func newsItems(_ any: Any?) -> [NewsItem] {
+        (any as? [[String: Any]] ?? []).map {
+            NewsItem(title: $0["title"] as? String ?? "", url: $0["url"] as? String ?? "", snippet: $0["snippet"] as? String ?? "",
+                     source: $0["source"] as? String ?? "", date: $0["date"] as? String ?? "", image: ($0["image"] as? String).flatMap(URL.init))
+        }
+    }
+
+    /// Scrolled to the bottom of the web results: ask the server for the next page (same as the website's Next button).
+    func loadMoreResults() async {
+        guard let c = client, hasMoreResults, !loadingMoreResults, !searching, !query.isEmpty else { return }
+        let page = resultsPage + 1
+        guard page <= 10 else { hasMoreResults = false; return }
+        loadingMoreResults = true
+        defer { loadingMoreResults = false }
+        let q = query
+        do {
+            let r = try await c.call("search", [q, page, results.map(\.url)]) as? [String: Any] ?? [:]
+            guard q == query else { return }                      // a new search started while this was loading
+            let have = Set(results.map(\.url))
+            let fresh = Hit.list(r["results"]).filter { !have.contains($0.url) }
+            if fresh.isEmpty { hasMoreResults = false } else { results += fresh; resultsPage = page }
+        } catch { hasMoreResults = false }
+    }
+
+    func loadMoreImages() async {
+        guard let c = client, hasMoreImages, !loadingMoreImages, !loadingImages, !query.isEmpty else { return }
+        let page = imagesPage + 1
+        guard page <= 5 else { hasMoreImages = false; return }
+        loadingMoreImages = true
+        defer { loadingMoreImages = false }
+        let q = query
+        do {
+            let r = try await c.call("search_images", [q, page]) as? [String: Any] ?? [:]
+            guard q == query else { return }
+            let have = Set(images.compactMap { $0.full?.absoluteString ?? $0.thumb?.absoluteString })
+            let fresh = Self.imageItems(r["items"]).filter { !have.contains($0.full?.absoluteString ?? $0.thumb?.absoluteString ?? "") }
+            if fresh.isEmpty { hasMoreImages = false } else { images += fresh; imagesPage = page }
+        } catch { hasMoreImages = false }           // e.g. an older server without page support: just stop
+    }
+
+    func loadMoreNews() async {
+        guard let c = client, hasMoreNews, !loadingMoreNews, !loadingNews, !query.isEmpty else { return }
+        let page = newsPage + 1
+        guard page <= 5 else { hasMoreNews = false; return }
+        loadingMoreNews = true
+        defer { loadingMoreNews = false }
+        let q = query
+        do {
+            let r = try await c.call("search_news", [q, page]) as? [String: Any] ?? [:]
+            guard q == query else { return }
+            let have = Set(news.map(\.url))
+            let fresh = Self.newsItems(r["items"]).filter { !have.contains($0.url) }
+            if fresh.isEmpty { hasMoreNews = false } else { news += fresh; newsPage = page }
+        } catch { hasMoreNews = false }
     }
 
     func loadNews() async {
@@ -1092,18 +1172,36 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         do {
             let r = try await c.call("search_news", [query]) as? [String: Any] ?? [:]
             newsError = r["error"] as? String
-            news = (r["items"] as? [[String: Any]] ?? []).map {
-                NewsItem(title: $0["title"] as? String ?? "", url: $0["url"] as? String ?? "", snippet: $0["snippet"] as? String ?? "",
-                         source: $0["source"] as? String ?? "", date: $0["date"] as? String ?? "", image: ($0["image"] as? String).flatMap(URL.init))
-            }
+            news = Self.newsItems(r["items"])
+            newsPage = 1
+            hasMoreNews = !news.isEmpty
         } catch { newsError = error.localizedDescription }
     }
 
-    func loadSuggestions() async {
-        guard let c = client, let r = try? await c.call("suggestions_get") as? [String: Any] else { return }
+    /// The website sends a new session id on every page load, and the server answers with a fresh personal set for a new id.
+    /// The app used to send none, so it only ever got the shared, saved set. A new id per launch = new suggestions on restart.
+    private static let launchSession = UUID().uuidString
+    private var suggestSession: String {
+        let fresh = UserDefaults.standard.object(forKey: "gollama.freshSuggestions") as? Bool ?? true
+        if fresh { return Self.launchSession }
+        let key = "gollama.suggestSession"                     // setting off: the same id every launch keeps the same set
+        if let s = UserDefaults.standard.string(forKey: key) { return s }
+        let s = UUID().uuidString
+        UserDefaults.standard.set(s, forKey: key)
+        return s
+    }
+
+    func loadSuggestions(attempt: Int = 0) async {
+        guard let c = client, let r = try? await c.call("suggestions_get", [suggestSession]) as? [String: Any] else { return }
         suggestions = (r["items"] as? [[String: Any]] ?? []).compactMap { d in
             guard let t = d["title"] as? String, !t.isEmpty else { return nil }
             return Suggestion(title: t, send: d["send"] as? String ?? t)
+        }
+        // the fast model is still making the new set (the old one is shown meanwhile): check again, like the website does
+        if (r["generating"] as? Bool) == true, attempt < 15 {
+            try? await Task.sleep(for: .seconds(3))
+            guard connected else { return }
+            await loadSuggestions(attempt: attempt + 1)
         }
     }
 
@@ -3570,6 +3668,10 @@ struct AllTab: View {
                     Text(e).foregroundStyle(.secondary).padding()
                 }
                 ForEach(app.results) { h in HitRow(hit: h) }
+                if app.hasMoreResults && !app.results.isEmpty {
+                    ProgressView().frame(maxWidth: .infinity).padding(.vertical, 20)
+                        .task(id: app.results.count) { await app.loadMoreResults() }
+                }
             }
             .padding(.horizontal, 14)
             .padding(.bottom, 30)
@@ -3724,6 +3826,10 @@ struct ImagesTab: View {
             .padding(.horizontal, 14)
             .padding(.bottom, 30)
             .readableWidth(900)
+            if app.hasMoreImages && !app.images.isEmpty {
+                ProgressView().frame(maxWidth: .infinity).padding(.bottom, 30)
+                    .task(id: app.images.count) { await app.loadMoreImages() }
+            }
         }
         .sheet(item: $selected) { ImagePreview(item: $0) }
     }
@@ -3790,6 +3896,10 @@ struct NewsTab: View {
                         .contentShape(.rect(cornerRadius: 22))
                     }
                     .buttonStyle(.plain)
+                }
+                if app.hasMoreNews && !app.news.isEmpty {
+                    ProgressView().frame(maxWidth: .infinity).padding(.vertical, 20)
+                        .task(id: app.news.count) { await app.loadMoreNews() }
                 }
             }
             .padding(.horizontal, 14)
@@ -4431,6 +4541,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Bindable private var prefs = Prefs.shared
     @State private var totalBytes: Int64 = 0
+    @AppStorage("gollama.freshSuggestions") private var freshSuggestions = true
 
     private var languageName: String {
         prefs.language == .system ? tr("System default") : prefs.language.nativeName
@@ -4486,6 +4597,14 @@ struct SettingsView: View {
                             Label(tr("Manage Storage"), systemImage: "internaldrive")
                         }
                     }
+                }
+
+                Section {
+                    Toggle(isOn: $freshSuggestions) {
+                        Label(tr("New suggestions on every launch"), systemImage: "sparkles")
+                    }
+                } footer: {
+                    Text(tr("Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings."))
                 }
             }
             .navigationTitle(tr("Settings"))
@@ -4714,7 +4833,9 @@ enum L10n {
         "Ask the AI to double-check": "Pedir a la IA que lo revise",
         "%@ pronunciation": "Pronunciación %@",
         "Standard": "Estándar",
-        "Speak": "Pronunciar"
+        "Speak": "Pronunciar",
+        "New suggestions on every launch": "Sugerencias nuevas en cada inicio",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "Crea nuevas sugerencias en la pantalla de inicio cada vez que se abre la app. Desactívalo para mantener las mismas. Requiere activar las sugerencias personales en los ajustes del servidor."
     ]
     static let fr: [String: String] = [
         "Settings": "Réglages",
@@ -4823,7 +4944,9 @@ enum L10n {
         "Ask the AI to double-check": "Demander à l'IA de vérifier",
         "%@ pronunciation": "Prononciation %@",
         "Standard": "Standard",
-        "Speak": "Prononcer"
+        "Speak": "Prononcer",
+        "New suggestions on every launch": "Nouvelles suggestions à chaque lancement",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "Génère de nouvelles suggestions sur la page d'accueil à chaque ouverture de l'app. Désactivez pour conserver les mêmes. Nécessite d'activer les suggestions personnelles dans les réglages du serveur."
     ]
     static let de: [String: String] = [
         "Settings": "Einstellungen",
@@ -4932,7 +5055,9 @@ enum L10n {
         "Ask the AI to double-check": "KI bitten, es zu prüfen",
         "%@ pronunciation": "%@ Aussprache",
         "Standard": "Standard",
-        "Speak": "Sprechen"
+        "Speak": "Sprechen",
+        "New suggestions on every launch": "Neue Vorschläge bei jedem Start",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "Erstellt bei jedem Öffnen der App neue Vorschläge auf der Startseite. Deaktiviere es, um dieselben zu behalten. Persönliche Vorschläge müssen in den Servereinstellungen aktiviert sein."
     ]
     static let it: [String: String] = [
         "Settings": "Impostazioni",
@@ -5041,7 +5166,9 @@ enum L10n {
         "Ask the AI to double-check": "Chiedi all'IA di ricontrollare",
         "%@ pronunciation": "Pronuncia %@",
         "Standard": "Standard",
-        "Speak": "Pronuncia"
+        "Speak": "Pronuncia",
+        "New suggestions on every launch": "Nuovi suggerimenti a ogni avvio",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "Crea nuovi suggerimenti nella home a ogni apertura dell'app. Disattiva per mantenere gli stessi. Richiede i suggerimenti personali attivi nelle impostazioni del server."
     ]
     static let pt: [String: String] = [
         "Settings": "Ajustes",
@@ -5150,7 +5277,9 @@ enum L10n {
         "Ask the AI to double-check": "Pedir à IA para verificar",
         "%@ pronunciation": "Pronúncia %@",
         "Standard": "Padrão",
-        "Speak": "Falar"
+        "Speak": "Falar",
+        "New suggestions on every launch": "Novas sugestões a cada abertura",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "Cria novas sugestões na página inicial sempre que o app é aberto. Desative para manter as mesmas. Requer sugestões pessoais ativadas nas configurações do servidor."
     ]
     static let nl: [String: String] = [
         "Settings": "Instellingen",
@@ -5259,7 +5388,9 @@ enum L10n {
         "Ask the AI to double-check": "Vraag de AI om te controleren",
         "%@ pronunciation": "%@ uitspraak",
         "Standard": "Standaard",
-        "Speak": "Uitspreken"
+        "Speak": "Uitspreken",
+        "New suggestions on every launch": "Nieuwe suggesties bij elke start",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "Maakt elke keer dat de app opent nieuwe suggesties op de startpagina. Zet uit om dezelfde te houden. Persoonlijke suggesties moeten aan staan in de serverinstellingen."
     ]
     static let sv: [String: String] = [
         "Settings": "Inställningar",
@@ -5368,7 +5499,9 @@ enum L10n {
         "Ask the AI to double-check": "Be AI:n dubbelkolla",
         "%@ pronunciation": "%@ uttal",
         "Standard": "Standard",
-        "Speak": "Uttala"
+        "Speak": "Uttala",
+        "New suggestions on every launch": "Nya förslag vid varje start",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "Skapar nya förslag på startsidan varje gång appen öppnas. Stäng av för att behålla samma. Kräver att personliga förslag är aktiverade i serverinställningarna."
     ]
     static let pl: [String: String] = [
         "Settings": "Ustawienia",
@@ -5477,7 +5610,9 @@ enum L10n {
         "Ask the AI to double-check": "Poproś AI o sprawdzenie",
         "%@ pronunciation": "Wymowa: %@",
         "Standard": "Standardowa",
-        "Speak": "Odtwórz"
+        "Speak": "Odtwórz",
+        "New suggestions on every launch": "Nowe podpowiedzi przy każdym uruchomieniu",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "Tworzy nowe podpowiedzi na stronie głównej przy każdym otwarciu aplikacji. Wyłącz, aby zachować te same. Wymaga włączenia podpowiedzi osobistych w ustawieniach serwera."
     ]
     static let tr: [String: String] = [
         "Settings": "Ayarlar",
@@ -5586,7 +5721,9 @@ enum L10n {
         "Ask the AI to double-check": "Yapay zekadan kontrol etmesini iste",
         "%@ pronunciation": "%@ telaffuz",
         "Standard": "Standart",
-        "Speak": "Seslendir"
+        "Speak": "Seslendir",
+        "New suggestions on every launch": "Her açılışta yeni öneriler",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "Uygulama her açıldığında ana sayfada yeni öneriler oluşturur. Aynılarını korumak için kapatın. Sunucu ayarlarında kişisel önerilerin açık olması gerekir."
     ]
     static let ru: [String: String] = [
         "Settings": "Настройки",
@@ -5695,7 +5832,9 @@ enum L10n {
         "Ask the AI to double-check": "Попросить ИИ перепроверить",
         "%@ pronunciation": "Произношение: %@",
         "Standard": "Стандартное",
-        "Speak": "Произнести"
+        "Speak": "Произнести",
+        "New suggestions on every launch": "Новые подсказки при каждом запуске",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "Создаёт новые подсказки на стартовой странице при каждом открытии приложения. Выключите, чтобы оставить прежние. Нужно включить персональные подсказки в настройках сервера."
     ]
     static let uk: [String: String] = [
         "Settings": "Налаштування",
@@ -5804,7 +5943,9 @@ enum L10n {
         "Ask the AI to double-check": "Попросити ШІ перевірити",
         "%@ pronunciation": "Вимова: %@",
         "Standard": "Стандартна",
-        "Speak": "Вимовити"
+        "Speak": "Вимовити",
+        "New suggestions on every launch": "Нові підказки під час кожного запуску",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "Створює нові підказки на початковій сторінці щоразу, коли відкривається застосунок. Вимкніть, щоб залишити ті самі. Потрібно ввімкнути персональні підказки в налаштуваннях сервера."
     ]
     static let ar: [String: String] = [
         "Settings": "الإعدادات",
@@ -5913,7 +6054,9 @@ enum L10n {
         "Ask the AI to double-check": "اطلب من الذكاء الاصطناعي التحقق",
         "%@ pronunciation": "نطق %@",
         "Standard": "قياسي",
-        "Speak": "نطق"
+        "Speak": "نطق",
+        "New suggestions on every launch": "اقتراحات جديدة عند كل تشغيل",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "ينشئ اقتراحات جديدة في الصفحة الرئيسية في كل مرة يُفتح فيها التطبيق. أوقفه للإبقاء على الاقتراحات نفسها. يتطلب تفعيل الاقتراحات الشخصية في إعدادات الخادم."
     ]
     static let he: [String: String] = [
         "Settings": "הגדרות",
@@ -6022,7 +6165,9 @@ enum L10n {
         "Ask the AI to double-check": "בקשו מה-AI לבדוק שוב",
         "%@ pronunciation": "ההגייה: %@",
         "Standard": "רגיל",
-        "Speak": "השמע"
+        "Speak": "השמע",
+        "New suggestions on every launch": "הצעות חדשות בכל הפעלה",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "יוצר הצעות חדשות בדף הבית בכל פתיחה של האפליקציה. כבו כדי לשמור על אותן הצעות. דורש הפעלת הצעות אישיות בהגדרות השרת."
     ]
     static let hi: [String: String] = [
         "Settings": "सेटिंग्स",
@@ -6131,7 +6276,9 @@ enum L10n {
         "Ask the AI to double-check": "AI से दोबारा जाँचने को कहें",
         "%@ pronunciation": "%@ उच्चारण",
         "Standard": "मानक",
-        "Speak": "बोलें"
+        "Speak": "बोलें",
+        "New suggestions on every launch": "हर बार खोलने पर नए सुझाव",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "ऐप खुलने पर हर बार होम पेज पर नए सुझाव बनाता है। वही सुझाव रखने के लिए इसे बंद करें। सर्वर सेटिंग्स में व्यक्तिगत सुझाव चालू होने चाहिए।"
     ]
     static let th: [String: String] = [
         "Settings": "การตั้งค่า",
@@ -6240,7 +6387,9 @@ enum L10n {
         "Ask the AI to double-check": "ให้ AI ตรวจสอบอีกครั้ง",
         "%@ pronunciation": "การออกเสียงแบบ %@",
         "Standard": "มาตรฐาน",
-        "Speak": "พูด"
+        "Speak": "พูด",
+        "New suggestions on every launch": "คำแนะนำใหม่ทุกครั้งที่เปิดแอป",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "สร้างคำแนะนำใหม่ในหน้าแรกทุกครั้งที่เปิดแอป ปิดเพื่อคงชุดเดิมไว้ ต้องเปิดคำแนะนำส่วนตัวในการตั้งค่าเซิร์ฟเวอร์"
     ]
     static let vi: [String: String] = [
         "Settings": "Cài đặt",
@@ -6349,7 +6498,9 @@ enum L10n {
         "Ask the AI to double-check": "Nhờ AI kiểm tra lại",
         "%@ pronunciation": "Phát âm %@",
         "Standard": "Chuẩn",
-        "Speak": "Đọc"
+        "Speak": "Đọc",
+        "New suggestions on every launch": "Gợi ý mới mỗi lần mở ứng dụng",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "Tạo gợi ý mới ở trang chủ mỗi lần mở ứng dụng. Tắt để giữ nguyên các gợi ý cũ. Cần bật gợi ý cá nhân trong cài đặt máy chủ."
     ]
     static let idn: [String: String] = [
         "Settings": "Pengaturan",
@@ -6458,7 +6609,9 @@ enum L10n {
         "Ask the AI to double-check": "Minta AI memeriksa ulang",
         "%@ pronunciation": "Pelafalan %@",
         "Standard": "Standar",
-        "Speak": "Ucapkan"
+        "Speak": "Ucapkan",
+        "New suggestions on every launch": "Saran baru setiap aplikasi dibuka",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "Membuat saran baru di halaman awal setiap aplikasi dibuka. Matikan untuk mempertahankan yang sama. Memerlukan saran pribadi diaktifkan di pengaturan server."
     ]
     static let ja: [String: String] = [
         "Settings": "設定",
@@ -6567,7 +6720,9 @@ enum L10n {
         "Ask the AI to double-check": "AI に再確認を依頼",
         "%@ pronunciation": "%@の発音",
         "Standard": "標準",
-        "Speak": "読み上げ"
+        "Speak": "読み上げ",
+        "New suggestions on every launch": "起動のたびに新しい候補を表示",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "アプリを開くたびにスタートページの候補を新しく作ります。オフにすると同じ候補を保ちます。サーバー設定でパーソナル候補を有効にする必要があります。"
     ]
     static let ko: [String: String] = [
         "Settings": "설정",
@@ -6676,7 +6831,9 @@ enum L10n {
         "Ask the AI to double-check": "AI에게 다시 확인 요청",
         "%@ pronunciation": "%@ 발음",
         "Standard": "표준",
-        "Speak": "읽어 주기"
+        "Speak": "읽어 주기",
+        "New suggestions on every launch": "실행할 때마다 새 추천",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "앱을 열 때마다 시작 페이지에 새 추천을 만듭니다. 끄면 같은 추천을 유지합니다. 서버 설정에서 개인 맞춤 추천을 켜야 합니다."
     ]
     static let zhHans: [String: String] = [
         "Settings": "设置",
@@ -6785,7 +6942,9 @@ enum L10n {
         "Ask the AI to double-check": "让 AI 再检查一下",
         "%@ pronunciation": "%@发音",
         "Standard": "标准",
-        "Speak": "朗读"
+        "Speak": "朗读",
+        "New suggestions on every launch": "每次启动都生成新建议",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "每次打开应用时都会在起始页生成新建议。关闭后将保持相同的建议。需要在服务器设置中开启个性化建议。"
     ]
     static let zhHant: [String: String] = [
         "Settings": "設定",
@@ -6894,7 +7053,9 @@ enum L10n {
         "Ask the AI to double-check": "請 AI 再檢查一次",
         "%@ pronunciation": "%@發音",
         "Standard": "標準",
-        "Speak": "朗讀"
+        "Speak": "朗讀",
+        "New suggestions on every launch": "每次啟動都產生新建議",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "每次開啟 App 時都會在起始頁產生新建議。關閉後會維持相同的建議。需要在伺服器設定中開啟個人化建議。"
     ]
     static let cs: [String: String] = [
         "Settings": "Nastavení",
@@ -7003,6 +7164,8 @@ enum L10n {
         "Ask the AI to double-check": "Požádat AI o kontrolu",
         "%@ pronunciation": "Výslovnost: %@",
         "Standard": "Standardní",
-        "Speak": "Přečíst"
+        "Speak": "Přečíst",
+        "New suggestions on every launch": "Nové návrhy při každém spuštění",
+        "Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings.": "Při každém otevření aplikace vytvoří nové návrhy na úvodní stránce. Vypnutím zachováte stejné. Vyžaduje zapnuté osobní návrhy v nastavení serveru."
     ]
 }
