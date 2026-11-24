@@ -27,6 +27,7 @@ import NaturalLanguage
 @main
 struct GollamaApp: App {
     @State private var app = AppModel()
+    init() { Storage.tidyOnLaunch() }
     var body: some Scene {
         WindowGroup {
             RootView()
@@ -439,11 +440,51 @@ enum VideoStore {
         try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
         return d
     }
+    // Chosen in Settings > Manage Storage (read straight from UserDefaults so this stays usable anywhere).
+    static var enabled: Bool { UserDefaults.standard.object(forKey: "gollama.keepVideos") as? Bool ?? true }
+    static var cap: Int64 { Int64(UserDefaults.standard.object(forKey: "gollama.videoCapMB") as? Int ?? 64) * 1024 * 1024 }
+    static var maxAge: TimeInterval {
+        let days = UserDefaults.standard.object(forKey: "gollama.videoDays") as? Int ?? 14
+        return days <= 0 ? .infinity : TimeInterval(days) * 24 * 3600
+    }
+
     static func save(_ src: URL, id: String) -> URL? {
+        guard enabled else { return nil }
         let ext = src.pathExtension.isEmpty ? "mov" : src.pathExtension
         let dst = dir.appendingPathComponent("\(id).\(ext)")
         try? FileManager.default.removeItem(at: dst)
-        return (try? FileManager.default.copyItem(at: src, to: dst)) != nil ? dst : nil
+        guard (try? FileManager.default.copyItem(at: src, to: dst)) != nil else { return nil }
+        prune(keeping: dst)
+        return dst
+    }
+
+    /// Deletes expired videos, then the oldest ones until the folder fits under `cap`. `keeping` is never touched.
+    static func prune(keeping: URL? = nil) {
+        let fm = FileManager.default
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey]
+        guard let files = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys) else { return }
+        var entries: [(url: URL, date: Date, size: Int64)] = files.map { f in
+            let v = try? f.resourceValues(forKeys: Set(keys))
+            return (f, v?.contentModificationDate ?? .distantPast, Int64(v?.fileSize ?? 0))
+        }
+        let now = Date()
+        entries.removeAll { e in
+            guard e.url != keeping, now.timeIntervalSince(e.date) > maxAge else { return false }
+            try? fm.removeItem(at: e.url)
+            return true
+        }
+        let limit = cap
+        var total = entries.reduce(Int64(0)) { $0 + $1.size }
+        for e in entries.sorted(by: { $0.date < $1.date }) where total > limit && e.url != keeping {
+            try? fm.removeItem(at: e.url)
+            total -= e.size
+        }
+    }
+
+    /// Removes a picked/imported video's temporary copy (never anything outside the temp folder).
+    static func discardTemp(_ url: URL) {
+        guard url.path.hasPrefix(FileManager.default.temporaryDirectory.path) else { return }
+        try? FileManager.default.removeItem(at: url)
     }
     static func cached(_ id: String) -> URL? {
         (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil))?.first { $0.deletingPathExtension().lastPathComponent == id }
@@ -455,6 +496,65 @@ enum VideoStore {
         if let r = try? await g.image(at: .zero) { return UIImage(cgImage: r.image) }
         return nil
     }
+}
+
+/// Everything the app keeps on disk that can be rebuilt: saved videos, image/web caches and leftover temp files.
+/// Never touched here: the login cookie (Library/Cookies) and the saved server address (UserDefaults), so you stay
+/// signed in and your server-side chat history stays reachable.
+enum Storage {
+    private static var caches: URL { FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0] }
+    private static var temp: URL { FileManager.default.temporaryDirectory }
+
+    private static func bytes(in dir: URL) -> Int64 {
+        guard let en = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .isRegularFileKey]) else { return 0 }
+        var total: Int64 = 0
+        for case let f as URL in en {
+            let v = try? f.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .isRegularFileKey])
+            if v?.isRegularFile == true { total += Int64(v?.totalFileAllocatedSize ?? 0) }
+        }
+        return total
+    }
+
+    static func videoBytes() -> Int64 { bytes(in: VideoStore.dir) }
+    /// Image/web caches plus temp files (everything except the saved videos).
+    static func cacheBytes() -> Int64 { max(0, bytes(in: caches) - videoBytes()) + bytes(in: temp) }
+    static func size() -> Int64 { bytes(in: caches) + bytes(in: temp) }
+
+    private static func empty(_ dir: URL, except keep: String? = nil) {
+        let fm = FileManager.default
+        for f in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] where f.lastPathComponent != keep {
+            try? fm.removeItem(at: f)
+        }
+    }
+
+    private static func clearWebCaches() {
+        let types: Set<String> = [WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache, WKWebsiteDataTypeOfflineWebApplicationCache, WKWebsiteDataTypeFetchCache]
+        WKWebsiteDataStore.default().removeData(ofTypes: types, modifiedSince: .distantPast) {}
+    }
+
+    /// Applies the image cache limit from Settings (0 = no image cache at all).
+    static func applyImageCacheLimit() {
+        let mb = UserDefaults.standard.object(forKey: "gollama.imageCacheMB") as? Int ?? 12
+        URLCache.shared = URLCache(memoryCapacity: mb == 0 ? 0 : 8 << 20, diskCapacity: mb << 20)
+    }
+
+    /// Runs on every launch: image cache limit, no stale temp copies, saved videos trimmed, old web caches dropped.
+    static func tidyOnLaunch() {
+        applyImageCacheLimit()
+        empty(temp)
+        VideoStore.prune()
+        clearWebCaches()
+    }
+
+    /// Image/web caches and temp files. Saved videos are left alone.
+    static func clearCache() {
+        URLCache.shared.removeAllCachedResponses()
+        clearWebCaches()
+        empty(temp)
+        empty(caches, except: VideoStore.dir.lastPathComponent)
+    }
+
+    static func clearVideos() { empty(VideoStore.dir) }
 }
 
 // MARK: - Regex helpers
@@ -1060,6 +1160,7 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
 
     func clearChats() async {
         _ = try? await client?.call("chats_clear")
+        try? FileManager.default.removeItem(at: VideoStore.dir)
         newChat()
         await loadChats()
     }
@@ -1347,6 +1448,7 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         a.localURL = url
         pending.append(a)
         Task { a.thumb = await VideoStore.thumbnail(url) }
+        defer { if a.localURL != url { VideoStore.discardTemp(url) } }     // the picker's temporary copy isn't needed once saved
         func fail(_ m: String) { a.state = "error"; a.message = m }
         do {
             let size = (try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? 0
@@ -1354,7 +1456,7 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
             guard b?["ok"] as? Bool == true, let vid = b?["id"] as? String else { fail(b?["error"] as? String ?? "Upload failed."); return }
             a.videoId = vid
             if let kept = VideoStore.save(url, id: vid) { a.localURL = kept }     // so you can watch it again from the chat
-            let fh = try FileHandle(forReadingFrom: url)
+            let fh = try FileHandle(forReadingFrom: a.localURL ?? url)
             defer { try? fh.close() }
             var sent = 0
             while true {
@@ -1385,6 +1487,7 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
     func remove(_ a: Attachment) {
         pending.removeAll { $0.id == a.id }
         if a.kind == .video, let id = a.videoId { Task { _ = try? await client?.call("video_discard", [id]) } }
+        if a.kind == .video, let u = a.localURL, u.path.hasPrefix(VideoStore.dir.path) { try? FileManager.default.removeItem(at: u) }
     }
 
     // MARK: event polling
@@ -2115,6 +2218,7 @@ struct HTMLPreviewView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
         cfg.allowsInlineMediaPlayback = true
+        cfg.websiteDataStore = .nonPersistent()              // previews shouldn't leave caches on disk
         let wv = WKWebView(frame: .zero, configuration: cfg)
         wv.navigationDelegate = context.coordinator
         wv.isOpaque = false
@@ -4084,6 +4188,11 @@ enum AppLanguage: String, CaseIterable, Identifiable {
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Bindable private var prefs = Prefs.shared
+    @State private var totalBytes: Int64 = 0
+
+    private var languageName: String {
+        prefs.language == .system ? tr("System default") : prefs.language.nativeName
+    }
 
     var body: some View {
         NavigationStack {
@@ -4116,30 +4225,139 @@ struct SettingsView: View {
                     Text(tr("Auto follows your device's appearance."))
                 }
 
-                Section(tr("Language")) {
-                    ForEach(AppLanguage.allCases) { lang in
-                        Button {
-                            prefs.language = lang
+                Section {
+                    NavigationLink {
+                        LanguageSettingsView()
+                    } label: {
+                        LabeledContent {
+                            Text(languageName)
                         } label: {
-                            HStack {
-                                Text(lang == .system ? tr("System default") : lang.nativeName)
-                                Spacer()
-                                if prefs.language == lang {
-                                    Image(systemName: "checkmark").fontWeight(.semibold).foregroundStyle(Pal.blue)
-                                }
-                            }
-                            .contentShape(Rectangle())
+                            Label(tr("Language"), systemImage: "globe")
                         }
-                        .buttonStyle(.plain)
+                    }
+                    NavigationLink {
+                        StorageSettingsView()
+                    } label: {
+                        LabeledContent {
+                            Text(ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file))
+                        } label: {
+                            Label(tr("Manage Storage"), systemImage: "internaldrive")
+                        }
                     }
                 }
             }
             .navigationTitle(tr("Settings"))
             .navigationBarTitleDisplayMode(.inline)
+            .task { totalBytes = Storage.size() }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) { Button(tr("Done")) { dismiss() } }
             }
         }
+    }
+}
+
+/// Settings > Language: one tap to pick the interface language.
+struct LanguageSettingsView: View {
+    @Bindable private var prefs = Prefs.shared
+
+    var body: some View {
+        Form {
+            ForEach(AppLanguage.allCases) { lang in
+                Button {
+                    prefs.language = lang
+                } label: {
+                    HStack {
+                        Text(lang == .system ? tr("System default") : lang.nativeName)
+                        Spacer()
+                        if prefs.language == lang {
+                            Image(systemName: "checkmark").fontWeight(.semibold).foregroundStyle(Pal.blue)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .navigationTitle(tr("Language"))
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// Settings > Manage Storage: what gets saved, how much room it may use, and what is using space right now.
+struct StorageSettingsView: View {
+    @Environment(AppModel.self) private var app
+    @AppStorage("gollama.keepVideos") private var keepVideos = true
+    @AppStorage("gollama.videoCapMB") private var videoCapMB = 64
+    @AppStorage("gollama.videoDays") private var videoDays = 14
+    @AppStorage("gollama.imageCacheMB") private var imageCacheMB = 12
+    @State private var videoBytes: Int64 = 0
+    @State private var cacheBytes: Int64 = 0
+
+    private func size(_ bytes: Int64) -> String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
+    private func mb(_ n: Int) -> String { size(Int64(n) * 1024 * 1024) }
+    private func days(_ n: Int) -> String {
+        n <= 0 ? tr("Forever") : n == 1 ? tr("1 day") : String(format: tr("%d days"), n)
+    }
+    private func refresh() {
+        videoBytes = Storage.videoBytes()
+        cacheBytes = Storage.cacheBytes()
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle(tr("Save uploaded videos"), isOn: $keepVideos)
+                Picker(tr("Video storage limit"), selection: $videoCapMB) {
+                    ForEach([32, 64, 128, 256, 512, 1024], id: \.self) { Text(mb($0)).tag($0) }
+                }
+                .disabled(!keepVideos)
+                Picker(tr("Keep videos for"), selection: $videoDays) {
+                    ForEach([1, 7, 14, 30, 0], id: \.self) { Text(days($0)).tag($0) }
+                }
+                .disabled(!keepVideos)
+            } header: {
+                Text(tr("Saved videos"))
+            } footer: {
+                Text(tr("Lets you watch a video again from the chat after you've sent it."))
+            }
+
+            Section {
+                Picker(tr("Image cache limit"), selection: $imageCacheMB) {
+                    ForEach([0, 12, 32, 64, 128], id: \.self) { Text($0 == 0 ? tr("Off") : mb($0)).tag($0) }
+                }
+            } footer: {
+                Text(tr("Images and web pages are kept so they load faster."))
+            }
+
+            Section {
+                LabeledContent(tr("Saved videos"), value: size(videoBytes))
+                LabeledContent(tr("Cache and temporary files"), value: size(cacheBytes))
+                LabeledContent(tr("Total"), value: size(videoBytes + cacheBytes)).fontWeight(.semibold)
+            } header: {
+                Text(tr("Usage"))
+            }
+
+            Section {
+                Button(tr("Clear saved videos"), role: .destructive) {
+                    Storage.clearVideos()
+                    refresh()
+                    app.flash(tr("Done"))
+                }
+                Button(tr("Clear cache"), role: .destructive) {
+                    Storage.clearCache()
+                    refresh()
+                    app.flash(tr("Done"))
+                }
+            } footer: {
+                Text(tr("Your chats live on the server, so clearing storage never deletes them."))
+            }
+        }
+        .navigationTitle(tr("Manage Storage"))
+        .navigationBarTitleDisplayMode(.inline)
+        .task { refresh() }
+        .onChange(of: videoCapMB) { _, _ in VideoStore.prune(); refresh() }
+        .onChange(of: videoDays) { _, _ in VideoStore.prune(); refresh() }
+        .onChange(of: imageCacheMB) { _, _ in Storage.applyImageCacheLimit(); refresh() }
     }
 }
 
@@ -4226,7 +4444,27 @@ enum L10n {
         "Wait for the attachment to finish.": "Espera a que termine el adjunto.",
         "Couldn't read that video.": "No se pudo leer ese vídeo.",
         "Couldn't read that photo.": "No se pudo leer esa foto.",
-        "%@ isn't a text file.": "%@ no es un archivo de texto."
+        "%@ isn't a text file.": "%@ no es un archivo de texto.",
+        "Storage": "Almacenamiento",
+        "Clear cache": "Borrar caché",
+        "Saved videos and cached images. Your chats stay on the server.": "Vídeos guardados e imágenes en caché. Tus chats permanecen en el servidor.",
+        "Manage Storage": "Administrar almacenamiento",
+        "Save uploaded videos": "Guardar vídeos subidos",
+        "Lets you watch a video again from the chat after you've sent it.": "Te permite volver a ver un vídeo desde el chat después de enviarlo.",
+        "Video storage limit": "Límite de almacenamiento de vídeo",
+        "Keep videos for": "Conservar vídeos durante",
+        "%d days": "%d días",
+        "1 day": "1 día",
+        "Forever": "Siempre",
+        "Image cache limit": "Límite de caché de imágenes",
+        "Off": "Desactivado",
+        "Images and web pages are kept so they load faster.": "Las imágenes y páginas web se guardan para que carguen más rápido.",
+        "Saved videos": "Vídeos guardados",
+        "Cache and temporary files": "Caché y archivos temporales",
+        "Total": "Total",
+        "Clear saved videos": "Borrar vídeos guardados",
+        "Usage": "Uso",
+        "Your chats live on the server, so clearing storage never deletes them.": "Tus chats están en el servidor, así que liberar almacenamiento nunca los elimina."
     ]
     static let fr: [String: String] = [
         "Settings": "Réglages",
@@ -4307,7 +4545,27 @@ enum L10n {
         "Wait for the attachment to finish.": "Attendez la fin du chargement de la pièce jointe.",
         "Couldn't read that video.": "Impossible de lire cette vidéo.",
         "Couldn't read that photo.": "Impossible de lire cette photo.",
-        "%@ isn't a text file.": "%@ n'est pas un fichier texte."
+        "%@ isn't a text file.": "%@ n'est pas un fichier texte.",
+        "Storage": "Stockage",
+        "Clear cache": "Vider le cache",
+        "Saved videos and cached images. Your chats stay on the server.": "Vidéos enregistrées et images en cache. Vos discussions restent sur le serveur.",
+        "Manage Storage": "Gérer le stockage",
+        "Save uploaded videos": "Enregistrer les vidéos envoyées",
+        "Lets you watch a video again from the chat after you've sent it.": "Permet de revoir une vidéo depuis la discussion après l'envoi.",
+        "Video storage limit": "Limite de stockage des vidéos",
+        "Keep videos for": "Conserver les vidéos pendant",
+        "%d days": "%d jours",
+        "1 day": "1 jour",
+        "Forever": "Toujours",
+        "Image cache limit": "Limite du cache d'images",
+        "Off": "Désactivé",
+        "Images and web pages are kept so they load faster.": "Les images et pages web sont conservées pour se charger plus vite.",
+        "Saved videos": "Vidéos enregistrées",
+        "Cache and temporary files": "Cache et fichiers temporaires",
+        "Total": "Total",
+        "Clear saved videos": "Supprimer les vidéos enregistrées",
+        "Usage": "Utilisation",
+        "Your chats live on the server, so clearing storage never deletes them.": "Vos discussions sont sur le serveur : libérer du stockage ne les supprime jamais."
     ]
     static let de: [String: String] = [
         "Settings": "Einstellungen",
@@ -4388,7 +4646,27 @@ enum L10n {
         "Wait for the attachment to finish.": "Warte, bis der Anhang fertig ist.",
         "Couldn't read that video.": "Das Video konnte nicht gelesen werden.",
         "Couldn't read that photo.": "Das Foto konnte nicht gelesen werden.",
-        "%@ isn't a text file.": "%@ ist keine Textdatei."
+        "%@ isn't a text file.": "%@ ist keine Textdatei.",
+        "Storage": "Speicher",
+        "Clear cache": "Cache leeren",
+        "Saved videos and cached images. Your chats stay on the server.": "Gespeicherte Videos und zwischengespeicherte Bilder. Deine Chats bleiben auf dem Server.",
+        "Manage Storage": "Speicher verwalten",
+        "Save uploaded videos": "Hochgeladene Videos speichern",
+        "Lets you watch a video again from the chat after you've sent it.": "Damit kannst du ein Video nach dem Senden im Chat erneut ansehen.",
+        "Video storage limit": "Speicherlimit für Videos",
+        "Keep videos for": "Videos behalten für",
+        "%d days": "%d Tage",
+        "1 day": "1 Tag",
+        "Forever": "Für immer",
+        "Image cache limit": "Limit für Bildcache",
+        "Off": "Aus",
+        "Images and web pages are kept so they load faster.": "Bilder und Webseiten werden zwischengespeichert, damit sie schneller laden.",
+        "Saved videos": "Gespeicherte Videos",
+        "Cache and temporary files": "Cache und temporäre Dateien",
+        "Total": "Gesamt",
+        "Clear saved videos": "Gespeicherte Videos löschen",
+        "Usage": "Belegung",
+        "Your chats live on the server, so clearing storage never deletes them.": "Deine Chats liegen auf dem Server, daher werden sie beim Leeren nie gelöscht."
     ]
     static let it: [String: String] = [
         "Settings": "Impostazioni",
@@ -4469,7 +4747,27 @@ enum L10n {
         "Wait for the attachment to finish.": "Attendi il completamento dell'allegato.",
         "Couldn't read that video.": "Impossibile leggere quel video.",
         "Couldn't read that photo.": "Impossibile leggere quella foto.",
-        "%@ isn't a text file.": "%@ non è un file di testo."
+        "%@ isn't a text file.": "%@ non è un file di testo.",
+        "Storage": "Spazio di archiviazione",
+        "Clear cache": "Svuota cache",
+        "Saved videos and cached images. Your chats stay on the server.": "Video salvati e immagini nella cache. Le chat restano sul server.",
+        "Manage Storage": "Gestisci spazio",
+        "Save uploaded videos": "Salva i video caricati",
+        "Lets you watch a video again from the chat after you've sent it.": "Ti permette di rivedere un video dalla chat dopo averlo inviato.",
+        "Video storage limit": "Limite di spazio per i video",
+        "Keep videos for": "Conserva i video per",
+        "%d days": "%d giorni",
+        "1 day": "1 giorno",
+        "Forever": "Per sempre",
+        "Image cache limit": "Limite cache immagini",
+        "Off": "Disattivato",
+        "Images and web pages are kept so they load faster.": "Immagini e pagine web vengono conservate per caricarsi più velocemente.",
+        "Saved videos": "Video salvati",
+        "Cache and temporary files": "Cache e file temporanei",
+        "Total": "Totale",
+        "Clear saved videos": "Elimina video salvati",
+        "Usage": "Utilizzo",
+        "Your chats live on the server, so clearing storage never deletes them.": "Le chat sono sul server, quindi liberare spazio non le elimina mai."
     ]
     static let pt: [String: String] = [
         "Settings": "Ajustes",
@@ -4550,7 +4848,27 @@ enum L10n {
         "Wait for the attachment to finish.": "Aguarde o anexo terminar.",
         "Couldn't read that video.": "Não foi possível ler esse vídeo.",
         "Couldn't read that photo.": "Não foi possível ler essa foto.",
-        "%@ isn't a text file.": "%@ não é um arquivo de texto."
+        "%@ isn't a text file.": "%@ não é um arquivo de texto.",
+        "Storage": "Armazenamento",
+        "Clear cache": "Limpar cache",
+        "Saved videos and cached images. Your chats stay on the server.": "Vídeos salvos e imagens em cache. Suas conversas ficam no servidor.",
+        "Manage Storage": "Gerenciar armazenamento",
+        "Save uploaded videos": "Salvar vídeos enviados",
+        "Lets you watch a video again from the chat after you've sent it.": "Permite assistir a um vídeo de novo na conversa depois de enviá-lo.",
+        "Video storage limit": "Limite de armazenamento de vídeos",
+        "Keep videos for": "Manter vídeos por",
+        "%d days": "%d dias",
+        "1 day": "1 dia",
+        "Forever": "Para sempre",
+        "Image cache limit": "Limite do cache de imagens",
+        "Off": "Desativado",
+        "Images and web pages are kept so they load faster.": "Imagens e páginas da web são mantidas para carregar mais rápido.",
+        "Saved videos": "Vídeos salvos",
+        "Cache and temporary files": "Cache e arquivos temporários",
+        "Total": "Total",
+        "Clear saved videos": "Limpar vídeos salvos",
+        "Usage": "Uso",
+        "Your chats live on the server, so clearing storage never deletes them.": "Suas conversas ficam no servidor, então limpar o armazenamento nunca as exclui."
     ]
     static let nl: [String: String] = [
         "Settings": "Instellingen",
@@ -4631,7 +4949,27 @@ enum L10n {
         "Wait for the attachment to finish.": "Wacht tot de bijlage klaar is.",
         "Couldn't read that video.": "Kon die video niet lezen.",
         "Couldn't read that photo.": "Kon die foto niet lezen.",
-        "%@ isn't a text file.": "%@ is geen tekstbestand."
+        "%@ isn't a text file.": "%@ is geen tekstbestand.",
+        "Storage": "Opslag",
+        "Clear cache": "Cache wissen",
+        "Saved videos and cached images. Your chats stay on the server.": "Opgeslagen video's en gecachete afbeeldingen. Je chats blijven op de server.",
+        "Manage Storage": "Opslag beheren",
+        "Save uploaded videos": "Geüploade video's bewaren",
+        "Lets you watch a video again from the chat after you've sent it.": "Hiermee kun je een video na het versturen opnieuw bekijken in de chat.",
+        "Video storage limit": "Opslaglimiet voor video's",
+        "Keep videos for": "Video's bewaren gedurende",
+        "%d days": "%d dagen",
+        "1 day": "1 dag",
+        "Forever": "Voor altijd",
+        "Image cache limit": "Limiet voor afbeeldingscache",
+        "Off": "Uit",
+        "Images and web pages are kept so they load faster.": "Afbeeldingen en webpagina's worden bewaard zodat ze sneller laden.",
+        "Saved videos": "Opgeslagen video's",
+        "Cache and temporary files": "Cache en tijdelijke bestanden",
+        "Total": "Totaal",
+        "Clear saved videos": "Opgeslagen video's wissen",
+        "Usage": "Gebruik",
+        "Your chats live on the server, so clearing storage never deletes them.": "Je chats staan op de server, dus opslag wissen verwijdert ze nooit."
     ]
     static let sv: [String: String] = [
         "Settings": "Inställningar",
@@ -4712,7 +5050,27 @@ enum L10n {
         "Wait for the attachment to finish.": "Vänta tills bilagan är klar.",
         "Couldn't read that video.": "Det gick inte att läsa videon.",
         "Couldn't read that photo.": "Det gick inte att läsa fotot.",
-        "%@ isn't a text file.": "%@ är inte en textfil."
+        "%@ isn't a text file.": "%@ är inte en textfil.",
+        "Storage": "Lagring",
+        "Clear cache": "Rensa cache",
+        "Saved videos and cached images. Your chats stay on the server.": "Sparade videor och cachade bilder. Dina chattar finns kvar på servern.",
+        "Manage Storage": "Hantera lagring",
+        "Save uploaded videos": "Spara uppladdade videor",
+        "Lets you watch a video again from the chat after you've sent it.": "Låter dig se en video igen från chatten efter att du skickat den.",
+        "Video storage limit": "Lagringsgräns för videor",
+        "Keep videos for": "Behåll videor i",
+        "%d days": "%d dagar",
+        "1 day": "1 dag",
+        "Forever": "För alltid",
+        "Image cache limit": "Gräns för bildcache",
+        "Off": "Av",
+        "Images and web pages are kept so they load faster.": "Bilder och webbsidor sparas så att de laddas snabbare.",
+        "Saved videos": "Sparade videor",
+        "Cache and temporary files": "Cache och tillfälliga filer",
+        "Total": "Totalt",
+        "Clear saved videos": "Rensa sparade videor",
+        "Usage": "Användning",
+        "Your chats live on the server, so clearing storage never deletes them.": "Dina chattar finns på servern, så att rensa lagring tar aldrig bort dem."
     ]
     static let pl: [String: String] = [
         "Settings": "Ustawienia",
@@ -4793,7 +5151,27 @@ enum L10n {
         "Wait for the attachment to finish.": "Poczekaj na zakończenie przesyłania załącznika.",
         "Couldn't read that video.": "Nie udało się odczytać tego filmu.",
         "Couldn't read that photo.": "Nie udało się odczytać tego zdjęcia.",
-        "%@ isn't a text file.": "%@ nie jest plikiem tekstowym."
+        "%@ isn't a text file.": "%@ nie jest plikiem tekstowym.",
+        "Storage": "Pamięć",
+        "Clear cache": "Wyczyść pamięć podręczną",
+        "Saved videos and cached images. Your chats stay on the server.": "Zapisane filmy i obrazy w pamięci podręcznej. Czaty pozostają na serwerze.",
+        "Manage Storage": "Zarządzaj pamięcią",
+        "Save uploaded videos": "Zapisuj przesłane filmy",
+        "Lets you watch a video again from the chat after you've sent it.": "Pozwala ponownie obejrzeć film z czatu po jego wysłaniu.",
+        "Video storage limit": "Limit miejsca na filmy",
+        "Keep videos for": "Przechowuj filmy przez",
+        "%d days": "%d dni",
+        "1 day": "1 dzień",
+        "Forever": "Bezterminowo",
+        "Image cache limit": "Limit pamięci podręcznej obrazów",
+        "Off": "Wyłączone",
+        "Images and web pages are kept so they load faster.": "Obrazy i strony internetowe są zapisywane, aby ładowały się szybciej.",
+        "Saved videos": "Zapisane filmy",
+        "Cache and temporary files": "Pamięć podręczna i pliki tymczasowe",
+        "Total": "Razem",
+        "Clear saved videos": "Usuń zapisane filmy",
+        "Usage": "Wykorzystanie",
+        "Your chats live on the server, so clearing storage never deletes them.": "Twoje czaty są na serwerze, więc czyszczenie pamięci nigdy ich nie usuwa."
     ]
     static let tr: [String: String] = [
         "Settings": "Ayarlar",
@@ -4874,7 +5252,27 @@ enum L10n {
         "Wait for the attachment to finish.": "Ek dosyanın işlenmesinin bitmesini bekleyin.",
         "Couldn't read that video.": "Video okunamadı.",
         "Couldn't read that photo.": "Fotoğraf okunamadı.",
-        "%@ isn't a text file.": "%@ bir metin dosyası değil."
+        "%@ isn't a text file.": "%@ bir metin dosyası değil.",
+        "Storage": "Depolama",
+        "Clear cache": "Önbelleği temizle",
+        "Saved videos and cached images. Your chats stay on the server.": "Kaydedilen videolar ve önbelleğe alınan görseller. Sohbetleriniz sunucuda kalır.",
+        "Manage Storage": "Depolamayı yönet",
+        "Save uploaded videos": "Yüklenen videoları kaydet",
+        "Lets you watch a video again from the chat after you've sent it.": "Gönderdikten sonra videoyu sohbetten tekrar izlemenizi sağlar.",
+        "Video storage limit": "Video depolama sınırı",
+        "Keep videos for": "Videoları saklama süresi",
+        "%d days": "%d gün",
+        "1 day": "1 gün",
+        "Forever": "Süresiz",
+        "Image cache limit": "Görsel önbellek sınırı",
+        "Off": "Kapalı",
+        "Images and web pages are kept so they load faster.": "Görseller ve web sayfaları daha hızlı yüklensin diye saklanır.",
+        "Saved videos": "Kaydedilen videolar",
+        "Cache and temporary files": "Önbellek ve geçici dosyalar",
+        "Total": "Toplam",
+        "Clear saved videos": "Kaydedilen videoları temizle",
+        "Usage": "Kullanım",
+        "Your chats live on the server, so clearing storage never deletes them.": "Sohbetleriniz sunucuda durur; depolamayı temizlemek onları asla silmez."
     ]
     static let ru: [String: String] = [
         "Settings": "Настройки",
@@ -4955,7 +5353,27 @@ enum L10n {
         "Wait for the attachment to finish.": "Дождитесь завершения загрузки вложения.",
         "Couldn't read that video.": "Не удалось прочитать видео.",
         "Couldn't read that photo.": "Не удалось прочитать фото.",
-        "%@ isn't a text file.": "%@ не является текстовым файлом."
+        "%@ isn't a text file.": "%@ не является текстовым файлом.",
+        "Storage": "Хранилище",
+        "Clear cache": "Очистить кэш",
+        "Saved videos and cached images. Your chats stay on the server.": "Сохранённые видео и кэшированные изображения. Чаты остаются на сервере.",
+        "Manage Storage": "Управление хранилищем",
+        "Save uploaded videos": "Сохранять загруженные видео",
+        "Lets you watch a video again from the chat after you've sent it.": "Позволяет пересмотреть видео в чате после отправки.",
+        "Video storage limit": "Лимит памяти для видео",
+        "Keep videos for": "Хранить видео",
+        "%d days": "%d дн.",
+        "1 day": "1 день",
+        "Forever": "Всегда",
+        "Image cache limit": "Лимит кэша изображений",
+        "Off": "Выкл.",
+        "Images and web pages are kept so they load faster.": "Изображения и веб-страницы сохраняются, чтобы загружаться быстрее.",
+        "Saved videos": "Сохранённые видео",
+        "Cache and temporary files": "Кэш и временные файлы",
+        "Total": "Итого",
+        "Clear saved videos": "Удалить сохранённые видео",
+        "Usage": "Использование",
+        "Your chats live on the server, so clearing storage never deletes them.": "Ваши чаты хранятся на сервере, поэтому очистка хранилища их не удаляет."
     ]
     static let uk: [String: String] = [
         "Settings": "Налаштування",
@@ -5036,7 +5454,27 @@ enum L10n {
         "Wait for the attachment to finish.": "Дочекайтеся завершення завантаження вкладення.",
         "Couldn't read that video.": "Не вдалося прочитати відео.",
         "Couldn't read that photo.": "Не вдалося прочитати фото.",
-        "%@ isn't a text file.": "%@ не є текстовим файлом."
+        "%@ isn't a text file.": "%@ не є текстовим файлом.",
+        "Storage": "Сховище",
+        "Clear cache": "Очистити кеш",
+        "Saved videos and cached images. Your chats stay on the server.": "Збережені відео та кешовані зображення. Чати залишаються на сервері.",
+        "Manage Storage": "Керування сховищем",
+        "Save uploaded videos": "Зберігати завантажені відео",
+        "Lets you watch a video again from the chat after you've sent it.": "Дозволяє переглянути відео в чаті ще раз після надсилання.",
+        "Video storage limit": "Ліміт сховища для відео",
+        "Keep videos for": "Зберігати відео",
+        "%d days": "%d дн.",
+        "1 day": "1 день",
+        "Forever": "Завжди",
+        "Image cache limit": "Ліміт кешу зображень",
+        "Off": "Вимк.",
+        "Images and web pages are kept so they load faster.": "Зображення та вебсторінки зберігаються, щоб завантажуватися швидше.",
+        "Saved videos": "Збережені відео",
+        "Cache and temporary files": "Кеш і тимчасові файли",
+        "Total": "Разом",
+        "Clear saved videos": "Видалити збережені відео",
+        "Usage": "Використання",
+        "Your chats live on the server, so clearing storage never deletes them.": "Ваші чати зберігаються на сервері, тож очищення сховища їх не видаляє."
     ]
     static let ar: [String: String] = [
         "Settings": "الإعدادات",
@@ -5117,7 +5555,27 @@ enum L10n {
         "Wait for the attachment to finish.": "انتظر حتى يكتمل المرفق.",
         "Couldn't read that video.": "تعذّرت قراءة هذا الفيديو.",
         "Couldn't read that photo.": "تعذّرت قراءة هذه الصورة.",
-        "%@ isn't a text file.": "%@ ليس ملفاً نصياً."
+        "%@ isn't a text file.": "%@ ليس ملفاً نصياً.",
+        "Storage": "التخزين",
+        "Clear cache": "مسح ذاكرة التخزين المؤقت",
+        "Saved videos and cached images. Your chats stay on the server.": "مقاطع الفيديو المحفوظة والصور المخزنة مؤقتاً. تبقى محادثاتك على الخادم.",
+        "Manage Storage": "إدارة التخزين",
+        "Save uploaded videos": "حفظ الفيديوهات المرفوعة",
+        "Lets you watch a video again from the chat after you've sent it.": "يتيح لك مشاهدة الفيديو مرة أخرى من المحادثة بعد إرساله.",
+        "Video storage limit": "حد تخزين الفيديو",
+        "Keep videos for": "الاحتفاظ بالفيديوهات لمدة",
+        "%d days": "%d يوم",
+        "1 day": "يوم واحد",
+        "Forever": "دائماً",
+        "Image cache limit": "حد ذاكرة الصور المؤقتة",
+        "Off": "إيقاف",
+        "Images and web pages are kept so they load faster.": "تُحفظ الصور وصفحات الويب لتحميلها بشكل أسرع.",
+        "Saved videos": "الفيديوهات المحفوظة",
+        "Cache and temporary files": "ذاكرة التخزين المؤقت والملفات المؤقتة",
+        "Total": "الإجمالي",
+        "Clear saved videos": "مسح الفيديوهات المحفوظة",
+        "Usage": "الاستخدام",
+        "Your chats live on the server, so clearing storage never deletes them.": "محادثاتك محفوظة على الخادم، لذا لا يؤدي مسح التخزين إلى حذفها أبداً."
     ]
     static let he: [String: String] = [
         "Settings": "הגדרות",
@@ -5198,7 +5656,27 @@ enum L10n {
         "Wait for the attachment to finish.": "המתן לסיום טעינת הקובץ המצורף.",
         "Couldn't read that video.": "לא ניתן לקרוא את הסרטון.",
         "Couldn't read that photo.": "לא ניתן לקרוא את התמונה.",
-        "%@ isn't a text file.": "%@ אינו קובץ טקסט."
+        "%@ isn't a text file.": "%@ אינו קובץ טקסט.",
+        "Storage": "אחסון",
+        "Clear cache": "נקה מטמון",
+        "Saved videos and cached images. Your chats stay on the server.": "סרטונים שמורים ותמונות במטמון. הצ'אטים שלך נשארים בשרת.",
+        "Manage Storage": "ניהול אחסון",
+        "Save uploaded videos": "שמור סרטונים שהועלו",
+        "Lets you watch a video again from the chat after you've sent it.": "מאפשר לצפות שוב בסרטון מהצ'אט אחרי ששלחת אותו.",
+        "Video storage limit": "מגבלת אחסון לסרטונים",
+        "Keep videos for": "שמור סרטונים למשך",
+        "%d days": "%d ימים",
+        "1 day": "יום אחד",
+        "Forever": "ללא הגבלה",
+        "Image cache limit": "מגבלת מטמון תמונות",
+        "Off": "כבוי",
+        "Images and web pages are kept so they load faster.": "תמונות ודפי אינטרנט נשמרים כדי שייטענו מהר יותר.",
+        "Saved videos": "סרטונים שמורים",
+        "Cache and temporary files": "מטמון וקבצים זמניים",
+        "Total": "סה״כ",
+        "Clear saved videos": "מחק סרטונים שמורים",
+        "Usage": "שימוש",
+        "Your chats live on the server, so clearing storage never deletes them.": "הצ'אטים שלך נשמרים בשרת, ולכן ניקוי האחסון לא מוחק אותם לעולם."
     ]
     static let hi: [String: String] = [
         "Settings": "सेटिंग्स",
@@ -5279,7 +5757,27 @@ enum L10n {
         "Wait for the attachment to finish.": "अटैचमेंट पूरा होने तक प्रतीक्षा करें।",
         "Couldn't read that video.": "वह वीडियो पढ़ा नहीं जा सका।",
         "Couldn't read that photo.": "वह फ़ोटो पढ़ी नहीं जा सकी।",
-        "%@ isn't a text file.": "%@ टेक्स्ट फ़ाइल नहीं है।"
+        "%@ isn't a text file.": "%@ टेक्स्ट फ़ाइल नहीं है।",
+        "Storage": "स्टोरेज",
+        "Clear cache": "कैश साफ़ करें",
+        "Saved videos and cached images. Your chats stay on the server.": "सहेजे गए वीडियो और कैश की गई छवियाँ। आपकी चैट सर्वर पर ही रहती हैं।",
+        "Manage Storage": "स्टोरेज प्रबंधित करें",
+        "Save uploaded videos": "अपलोड किए वीडियो सहेजें",
+        "Lets you watch a video again from the chat after you've sent it.": "भेजने के बाद चैट से वीडियो दोबारा देखने की सुविधा देता है।",
+        "Video storage limit": "वीडियो स्टोरेज सीमा",
+        "Keep videos for": "वीडियो रखें",
+        "%d days": "%d दिन",
+        "1 day": "1 दिन",
+        "Forever": "हमेशा",
+        "Image cache limit": "छवि कैश सीमा",
+        "Off": "बंद",
+        "Images and web pages are kept so they load faster.": "छवियाँ और वेब पेज तेज़ी से लोड होने के लिए सहेजे जाते हैं।",
+        "Saved videos": "सहेजे गए वीडियो",
+        "Cache and temporary files": "कैश और अस्थायी फ़ाइलें",
+        "Total": "कुल",
+        "Clear saved videos": "सहेजे गए वीडियो साफ़ करें",
+        "Usage": "उपयोग",
+        "Your chats live on the server, so clearing storage never deletes them.": "आपकी चैट सर्वर पर रहती हैं, इसलिए स्टोरेज साफ़ करने से वे कभी नहीं हटतीं।"
     ]
     static let th: [String: String] = [
         "Settings": "การตั้งค่า",
@@ -5360,7 +5858,27 @@ enum L10n {
         "Wait for the attachment to finish.": "รอให้ไฟล์แนบเสร็จก่อน",
         "Couldn't read that video.": "ไม่สามารถอ่านวิดีโอนั้นได้",
         "Couldn't read that photo.": "ไม่สามารถอ่านรูปภาพนั้นได้",
-        "%@ isn't a text file.": "%@ ไม่ใช่ไฟล์ข้อความ"
+        "%@ isn't a text file.": "%@ ไม่ใช่ไฟล์ข้อความ",
+        "Storage": "พื้นที่จัดเก็บ",
+        "Clear cache": "ล้างแคช",
+        "Saved videos and cached images. Your chats stay on the server.": "วิดีโอที่บันทึกไว้และรูปภาพในแคช แชตของคุณยังอยู่บนเซิร์ฟเวอร์",
+        "Manage Storage": "จัดการพื้นที่จัดเก็บ",
+        "Save uploaded videos": "บันทึกวิดีโอที่อัปโหลด",
+        "Lets you watch a video again from the chat after you've sent it.": "ช่วยให้ดูวิดีโอซ้ำจากแชตได้หลังจากส่งแล้ว",
+        "Video storage limit": "ขีดจำกัดพื้นที่วิดีโอ",
+        "Keep videos for": "เก็บวิดีโอไว้",
+        "%d days": "%d วัน",
+        "1 day": "1 วัน",
+        "Forever": "ตลอดไป",
+        "Image cache limit": "ขีดจำกัดแคชรูปภาพ",
+        "Off": "ปิด",
+        "Images and web pages are kept so they load faster.": "เก็บรูปภาพและหน้าเว็บไว้เพื่อให้โหลดเร็วขึ้น",
+        "Saved videos": "วิดีโอที่บันทึกไว้",
+        "Cache and temporary files": "แคชและไฟล์ชั่วคราว",
+        "Total": "รวม",
+        "Clear saved videos": "ล้างวิดีโอที่บันทึกไว้",
+        "Usage": "การใช้งาน",
+        "Your chats live on the server, so clearing storage never deletes them.": "แชตของคุณอยู่บนเซิร์ฟเวอร์ ดังนั้นการล้างพื้นที่จัดเก็บจะไม่ลบแชตเหล่านั้น"
     ]
     static let vi: [String: String] = [
         "Settings": "Cài đặt",
@@ -5441,7 +5959,27 @@ enum L10n {
         "Wait for the attachment to finish.": "Hãy đợi tệp đính kèm xử lý xong.",
         "Couldn't read that video.": "Không thể đọc video đó.",
         "Couldn't read that photo.": "Không thể đọc ảnh đó.",
-        "%@ isn't a text file.": "%@ không phải là tệp văn bản."
+        "%@ isn't a text file.": "%@ không phải là tệp văn bản.",
+        "Storage": "Dung lượng",
+        "Clear cache": "Xóa bộ nhớ đệm",
+        "Saved videos and cached images. Your chats stay on the server.": "Video đã lưu và hình ảnh trong bộ nhớ đệm. Cuộc trò chuyện của bạn vẫn ở trên máy chủ.",
+        "Manage Storage": "Quản lý dung lượng",
+        "Save uploaded videos": "Lưu video đã tải lên",
+        "Lets you watch a video again from the chat after you've sent it.": "Cho phép xem lại video từ cuộc trò chuyện sau khi đã gửi.",
+        "Video storage limit": "Giới hạn dung lượng video",
+        "Keep videos for": "Giữ video trong",
+        "%d days": "%d ngày",
+        "1 day": "1 ngày",
+        "Forever": "Mãi mãi",
+        "Image cache limit": "Giới hạn bộ nhớ đệm ảnh",
+        "Off": "Tắt",
+        "Images and web pages are kept so they load faster.": "Hình ảnh và trang web được giữ lại để tải nhanh hơn.",
+        "Saved videos": "Video đã lưu",
+        "Cache and temporary files": "Bộ nhớ đệm và tệp tạm",
+        "Total": "Tổng cộng",
+        "Clear saved videos": "Xóa video đã lưu",
+        "Usage": "Mức sử dụng",
+        "Your chats live on the server, so clearing storage never deletes them.": "Cuộc trò chuyện nằm trên máy chủ nên việc dọn dung lượng không bao giờ xóa chúng."
     ]
     static let idn: [String: String] = [
         "Settings": "Pengaturan",
@@ -5522,7 +6060,27 @@ enum L10n {
         "Wait for the attachment to finish.": "Tunggu hingga lampiran selesai.",
         "Couldn't read that video.": "Tidak dapat membaca video itu.",
         "Couldn't read that photo.": "Tidak dapat membaca foto itu.",
-        "%@ isn't a text file.": "%@ bukan file teks."
+        "%@ isn't a text file.": "%@ bukan file teks.",
+        "Storage": "Penyimpanan",
+        "Clear cache": "Hapus cache",
+        "Saved videos and cached images. Your chats stay on the server.": "Video tersimpan dan gambar cache. Obrolan Anda tetap ada di server.",
+        "Manage Storage": "Kelola penyimpanan",
+        "Save uploaded videos": "Simpan video yang diunggah",
+        "Lets you watch a video again from the chat after you've sent it.": "Memungkinkan Anda menonton ulang video dari obrolan setelah dikirim.",
+        "Video storage limit": "Batas penyimpanan video",
+        "Keep videos for": "Simpan video selama",
+        "%d days": "%d hari",
+        "1 day": "1 hari",
+        "Forever": "Selamanya",
+        "Image cache limit": "Batas cache gambar",
+        "Off": "Mati",
+        "Images and web pages are kept so they load faster.": "Gambar dan halaman web disimpan agar dimuat lebih cepat.",
+        "Saved videos": "Video tersimpan",
+        "Cache and temporary files": "Cache dan file sementara",
+        "Total": "Total",
+        "Clear saved videos": "Hapus video tersimpan",
+        "Usage": "Penggunaan",
+        "Your chats live on the server, so clearing storage never deletes them.": "Obrolan Anda ada di server, jadi membersihkan penyimpanan tidak akan menghapusnya."
     ]
     static let ja: [String: String] = [
         "Settings": "設定",
@@ -5603,7 +6161,27 @@ enum L10n {
         "Wait for the attachment to finish.": "添付ファイルの処理が終わるまでお待ちください。",
         "Couldn't read that video.": "その動画を読み込めませんでした。",
         "Couldn't read that photo.": "その写真を読み込めませんでした。",
-        "%@ isn't a text file.": "%@ はテキストファイルではありません。"
+        "%@ isn't a text file.": "%@ はテキストファイルではありません。",
+        "Storage": "ストレージ",
+        "Clear cache": "キャッシュを消去",
+        "Saved videos and cached images. Your chats stay on the server.": "保存した動画とキャッシュ画像。チャットはサーバーに残ります。",
+        "Manage Storage": "ストレージを管理",
+        "Save uploaded videos": "アップロードした動画を保存",
+        "Lets you watch a video again from the chat after you've sent it.": "送信後でも、チャットから動画をもう一度見られます。",
+        "Video storage limit": "動画の保存容量の上限",
+        "Keep videos for": "動画の保存期間",
+        "%d days": "%d日",
+        "1 day": "1日",
+        "Forever": "無期限",
+        "Image cache limit": "画像キャッシュの上限",
+        "Off": "オフ",
+        "Images and web pages are kept so they load faster.": "画像やウェブページを保持して、読み込みを速くします。",
+        "Saved videos": "保存した動画",
+        "Cache and temporary files": "キャッシュと一時ファイル",
+        "Total": "合計",
+        "Clear saved videos": "保存した動画を消去",
+        "Usage": "使用状況",
+        "Your chats live on the server, so clearing storage never deletes them.": "チャットはサーバーに保存されているため、ストレージを消去しても削除されません。"
     ]
     static let ko: [String: String] = [
         "Settings": "설정",
@@ -5684,7 +6262,27 @@ enum L10n {
         "Wait for the attachment to finish.": "첨부 파일 처리가 끝날 때까지 기다리세요.",
         "Couldn't read that video.": "해당 동영상을 읽을 수 없습니다.",
         "Couldn't read that photo.": "해당 사진을 읽을 수 없습니다.",
-        "%@ isn't a text file.": "%@은(는) 텍스트 파일이 아닙니다."
+        "%@ isn't a text file.": "%@은(는) 텍스트 파일이 아닙니다.",
+        "Storage": "저장 공간",
+        "Clear cache": "캐시 지우기",
+        "Saved videos and cached images. Your chats stay on the server.": "저장된 동영상과 캐시된 이미지입니다. 채팅은 서버에 그대로 남습니다.",
+        "Manage Storage": "저장 공간 관리",
+        "Save uploaded videos": "업로드한 동영상 저장",
+        "Lets you watch a video again from the chat after you've sent it.": "전송한 뒤에도 채팅에서 동영상을 다시 볼 수 있습니다.",
+        "Video storage limit": "동영상 저장 용량 한도",
+        "Keep videos for": "동영상 보관 기간",
+        "%d days": "%d일",
+        "1 day": "1일",
+        "Forever": "무기한",
+        "Image cache limit": "이미지 캐시 한도",
+        "Off": "끔",
+        "Images and web pages are kept so they load faster.": "이미지와 웹페이지를 보관해 더 빠르게 로드합니다.",
+        "Saved videos": "저장된 동영상",
+        "Cache and temporary files": "캐시 및 임시 파일",
+        "Total": "합계",
+        "Clear saved videos": "저장된 동영상 지우기",
+        "Usage": "사용량",
+        "Your chats live on the server, so clearing storage never deletes them.": "채팅은 서버에 저장되므로 저장 공간을 지워도 삭제되지 않습니다."
     ]
     static let zhHans: [String: String] = [
         "Settings": "设置",
@@ -5765,7 +6363,27 @@ enum L10n {
         "Wait for the attachment to finish.": "请等待附件处理完成。",
         "Couldn't read that video.": "无法读取该视频。",
         "Couldn't read that photo.": "无法读取该照片。",
-        "%@ isn't a text file.": "%@ 不是文本文件。"
+        "%@ isn't a text file.": "%@ 不是文本文件。",
+        "Storage": "存储空间",
+        "Clear cache": "清除缓存",
+        "Saved videos and cached images. Your chats stay on the server.": "已保存的视频和缓存的图片。聊天记录保留在服务器上。",
+        "Manage Storage": "管理存储空间",
+        "Save uploaded videos": "保存已上传的视频",
+        "Lets you watch a video again from the chat after you've sent it.": "让你在发送后仍可在聊天中再次观看视频。",
+        "Video storage limit": "视频存储上限",
+        "Keep videos for": "视频保留时间",
+        "%d days": "%d 天",
+        "1 day": "1 天",
+        "Forever": "永久",
+        "Image cache limit": "图片缓存上限",
+        "Off": "关闭",
+        "Images and web pages are kept so they load faster.": "保留图片和网页，以便更快加载。",
+        "Saved videos": "已保存的视频",
+        "Cache and temporary files": "缓存和临时文件",
+        "Total": "总计",
+        "Clear saved videos": "清除已保存的视频",
+        "Usage": "使用情况",
+        "Your chats live on the server, so clearing storage never deletes them.": "聊天记录保存在服务器上，因此清理存储空间不会删除它们。"
     ]
     static let zhHant: [String: String] = [
         "Settings": "設定",
@@ -5846,7 +6464,27 @@ enum L10n {
         "Wait for the attachment to finish.": "請等待附件處理完成。",
         "Couldn't read that video.": "無法讀取該影片。",
         "Couldn't read that photo.": "無法讀取該照片。",
-        "%@ isn't a text file.": "%@ 不是文字檔。"
+        "%@ isn't a text file.": "%@ 不是文字檔。",
+        "Storage": "儲存空間",
+        "Clear cache": "清除快取",
+        "Saved videos and cached images. Your chats stay on the server.": "已儲存的影片和快取的圖片。對話保留在伺服器上。",
+        "Manage Storage": "管理儲存空間",
+        "Save uploaded videos": "儲存已上傳的影片",
+        "Lets you watch a video again from the chat after you've sent it.": "讓你在傳送後仍可在對話中再次觀看影片。",
+        "Video storage limit": "影片儲存上限",
+        "Keep videos for": "影片保留時間",
+        "%d days": "%d 天",
+        "1 day": "1 天",
+        "Forever": "永久",
+        "Image cache limit": "圖片快取上限",
+        "Off": "關閉",
+        "Images and web pages are kept so they load faster.": "保留圖片和網頁，以便更快載入。",
+        "Saved videos": "已儲存的影片",
+        "Cache and temporary files": "快取和暫存檔案",
+        "Total": "總計",
+        "Clear saved videos": "清除已儲存的影片",
+        "Usage": "使用情況",
+        "Your chats live on the server, so clearing storage never deletes them.": "對話保存在伺服器上，因此清理儲存空間不會刪除它們。"
     ]
     static let cs: [String: String] = [
         "Settings": "Nastavení",
@@ -5927,6 +6565,26 @@ enum L10n {
         "Wait for the attachment to finish.": "Počkejte, až se příloha dokončí.",
         "Couldn't read that video.": "Video se nepodařilo načíst.",
         "Couldn't read that photo.": "Fotku se nepodařilo načíst.",
-        "%@ isn't a text file.": "%@ není textový soubor."
+        "%@ isn't a text file.": "%@ není textový soubor.",
+        "Storage": "Úložiště",
+        "Clear cache": "Vymazat mezipaměť",
+        "Saved videos and cached images. Your chats stay on the server.": "Uložená videa a obrázky v mezipaměti. Chaty zůstávají na serveru.",
+        "Manage Storage": "Správa úložiště",
+        "Save uploaded videos": "Ukládat nahraná videa",
+        "Lets you watch a video again from the chat after you've sent it.": "Umožní vám video po odeslání znovu přehrát z chatu.",
+        "Video storage limit": "Limit úložiště pro videa",
+        "Keep videos for": "Uchovávat videa po dobu",
+        "%d days": "%d dní",
+        "1 day": "1 den",
+        "Forever": "Navždy",
+        "Image cache limit": "Limit mezipaměti obrázků",
+        "Off": "Vypnuto",
+        "Images and web pages are kept so they load faster.": "Obrázky a webové stránky se ukládají, aby se načítaly rychleji.",
+        "Saved videos": "Uložená videa",
+        "Cache and temporary files": "Mezipaměť a dočasné soubory",
+        "Total": "Celkem",
+        "Clear saved videos": "Vymazat uložená videa",
+        "Usage": "Využití",
+        "Your chats live on the server, so clearing storage never deletes them.": "Vaše chaty jsou na serveru, takže vymazání úložiště je nikdy neodstraní."
     ]
 }
