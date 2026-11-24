@@ -1116,27 +1116,40 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         }
     }
 
+    /// A request that was cancelled (view went away, app switched) isn't "no more results".
+    private static func wasCancelled(_ error: Error) -> Bool {
+        error is CancellationError || (error as? URLError)?.code == .cancelled
+    }
+
     /// Scrolled to the bottom of the web results: ask the server for the next page (same as the website's Next button).
+    /// A page that comes back empty or all-repeats is skipped (up to two in a row) before we decide that's everything.
     func loadMoreResults() async {
         guard let c = client, hasMoreResults, !loadingMoreResults, !searching, !query.isEmpty else { return }
-        let page = resultsPage + 1
-        guard page <= 10 else { hasMoreResults = false; return }
         loadingMoreResults = true
         defer { loadingMoreResults = false }
         let q = query
-        do {
-            let r = try await c.call("search", [q, page, results.map(\.url)]) as? [String: Any] ?? [:]
-            guard q == query else { return }                      // a new search started while this was loading
-            let have = Set(results.map(\.url))
-            let fresh = Hit.list(r["results"]).filter { !have.contains($0.url) }
-            if fresh.isEmpty { hasMoreResults = false } else { results += fresh; resultsPage = page }
-        } catch { hasMoreResults = false }
+        var page = resultsPage
+        for _ in 0..<3 {
+            page += 1
+            guard page <= 10 else { hasMoreResults = false; return }
+            do {
+                let r = try await c.call("search", [q, page, results.map(\.url)]) as? [String: Any] ?? [:]
+                guard q == query else { return }                  // a new search started while this was loading
+                let have = Set(results.map(\.url))
+                let fresh = Hit.list(r["results"]).filter { !have.contains($0.url) }
+                if !fresh.isEmpty { results += fresh; resultsPage = page; return }
+            } catch {
+                if Self.wasCancelled(error) { return }
+                break
+            }
+        }
+        hasMoreResults = false
     }
 
     func loadMoreImages() async {
         guard let c = client, hasMoreImages, !loadingMoreImages, !loadingImages, !query.isEmpty else { return }
         let page = imagesPage + 1
-        guard page <= 5 else { hasMoreImages = false; return }
+        guard page <= 30 else { hasMoreImages = false; return }
         loadingMoreImages = true
         defer { loadingMoreImages = false }
         let q = query
@@ -1146,13 +1159,15 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
             let have = Set(images.compactMap { $0.full?.absoluteString ?? $0.thumb?.absoluteString })
             let fresh = Self.imageItems(r["items"]).filter { !have.contains($0.full?.absoluteString ?? $0.thumb?.absoluteString ?? "") }
             if fresh.isEmpty { hasMoreImages = false } else { images += fresh; imagesPage = page }
-        } catch { hasMoreImages = false }           // e.g. an older server without page support: just stop
+        } catch {
+            if !Self.wasCancelled(error) { hasMoreImages = false }       // e.g. an older server without page support: just stop
+        }
     }
 
     func loadMoreNews() async {
         guard let c = client, hasMoreNews, !loadingMoreNews, !loadingNews, !query.isEmpty else { return }
         let page = newsPage + 1
-        guard page <= 5 else { hasMoreNews = false; return }
+        guard page <= 30 else { hasMoreNews = false; return }
         loadingMoreNews = true
         defer { loadingMoreNews = false }
         let q = query
@@ -1162,20 +1177,9 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
             let have = Set(news.map(\.url))
             let fresh = Self.newsItems(r["items"]).filter { !have.contains($0.url) }
             if fresh.isEmpty { hasMoreNews = false } else { news += fresh; newsPage = page }
-        } catch { hasMoreNews = false }
-    }
-
-    func loadNews() async {
-        guard let c = client else { return }
-        loadingNews = true
-        defer { loadingNews = false }
-        do {
-            let r = try await c.call("search_news", [query]) as? [String: Any] ?? [:]
-            newsError = r["error"] as? String
-            news = Self.newsItems(r["items"])
-            newsPage = 1
-            hasMoreNews = !news.isEmpty
-        } catch { newsError = error.localizedDescription }
+        } catch {
+            if !Self.wasCancelled(error) { hasMoreNews = false }
+        }
     }
 
     /// The website sends a new session id on every page load, and the server answers with a fresh personal set for a new id.
@@ -3645,6 +3649,26 @@ struct HitRow: View {
     }
 }
 
+/// Sits at the end of a list. When it scrolls near the screen it asks for the next batch, and asks again after each
+/// batch while it is still in view. The request runs in its own Task, so scrolling away can't cancel it half way
+/// (which is what made loading stop after the first extra page).
+struct LoadMoreTrigger: View {
+    let count: Int
+    let load: () async -> Void
+    @State private var visible = false
+
+    var body: some View {
+        ProgressView()
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 22)
+            .onAppear { visible = true; fire() }
+            .onDisappear { visible = false }
+            .onChange(of: count) { _, _ in if visible { fire() } }
+    }
+
+    private func fire() { Task { await load() } }
+}
+
 struct AllTab: View {
     @Environment(AppModel.self) private var app
     var body: some View {
@@ -3669,8 +3693,7 @@ struct AllTab: View {
                 }
                 ForEach(app.results) { h in HitRow(hit: h) }
                 if app.hasMoreResults && !app.results.isEmpty {
-                    ProgressView().frame(maxWidth: .infinity).padding(.vertical, 20)
-                        .task(id: app.results.count) { await app.loadMoreResults() }
+                    LoadMoreTrigger(count: app.results.count) { await app.loadMoreResults() }
                 }
             }
             .padding(.horizontal, 14)
@@ -3798,6 +3821,7 @@ struct ImagesTab: View {
         ScrollView {
             if app.loadingImages { ProgressView().padding(.top, 40) }
             if let e = app.imagesError, app.images.isEmpty { Text(e).foregroundStyle(.secondary).padding() }
+            LazyVStack(spacing: 0) {
             LazyVGrid(columns: cols, spacing: 10) {
                 ForEach(app.images) { img in
                     Button { selected = img } label: {
@@ -3826,9 +3850,9 @@ struct ImagesTab: View {
             .padding(.horizontal, 14)
             .padding(.bottom, 30)
             .readableWidth(900)
-            if app.hasMoreImages && !app.images.isEmpty {
-                ProgressView().frame(maxWidth: .infinity).padding(.bottom, 30)
-                    .task(id: app.images.count) { await app.loadMoreImages() }
+                if app.hasMoreImages && !app.images.isEmpty {
+                    LoadMoreTrigger(count: app.images.count) { await app.loadMoreImages() }
+                }
             }
         }
         .sheet(item: $selected) { ImagePreview(item: $0) }
@@ -3898,8 +3922,7 @@ struct NewsTab: View {
                     .buttonStyle(.plain)
                 }
                 if app.hasMoreNews && !app.news.isEmpty {
-                    ProgressView().frame(maxWidth: .infinity).padding(.vertical, 20)
-                        .task(id: app.news.count) { await app.loadMoreNews() }
+                    LoadMoreTrigger(count: app.news.count) { await app.loadMoreNews() }
                 }
             }
             .padding(.horizontal, 14)
