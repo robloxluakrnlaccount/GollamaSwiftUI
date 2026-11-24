@@ -1581,17 +1581,26 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         }
     }
 
-    func downloadArtifact(_ name: String) async -> URL? {
-        guard let c = client, let cid = chatId else { return nil }
-        guard let r = try? await c.call("artifact_download", [cid, name]) as? [String: Any],
-              r["ok"] as? Bool == true,
-              let dataUrl = r["url"] as? String,
-              let comma = dataUrl.firstIndex(of: ","),
-              let data = Data(base64Encoded: String(dataUrl[dataUrl.index(after: comma)...])) else { return nil }
-        let safe = (r["name"] as? String) ?? name
-        let dst = FileManager.default.temporaryDirectory.appendingPathComponent(safe)
-        try? data.write(to: dst)
-        return dst
+    func downloadArtifact(_ name: String) async -> (url: URL?, error: String?) {
+        guard let c = client else { return (nil, "Not connected to server.") }
+        let cid = chatId ?? "default"
+        do {
+            let r = try await c.call("artifact_download", [cid, name]) as? [String: Any] ?? [:]
+            guard r["ok"] as? Bool == true else {
+                return (nil, (r["error"] as? String) ?? "Artifact not found.")
+            }
+            guard let dataUrl = r["url"] as? String,
+                  let comma = dataUrl.firstIndex(of: ","),
+                  let data = Data(base64Encoded: String(dataUrl[dataUrl.index(after: comma)...]), options: .ignoreUnknownCharacters) else {
+                return (nil, "Could not decode artifact data.")
+            }
+            let safe = (r["name"] as? String) ?? name
+            let dst = FileManager.default.temporaryDirectory.appendingPathComponent(safe)
+            try data.write(to: dst)
+            return (dst, nil)
+        } catch {
+            return (nil, error.localizedDescription)
+        }
     }
 
     func addVideo(url: URL, name: String) async {
@@ -7263,14 +7272,31 @@ struct ArtifactCard: View {
     @State private var exportedURL: URL?
     @State private var textPreview: String?
     @State private var showPreview = false
+    @State private var errorText: String?
 
     private static let textExts: Set<String> = ["py", "html", "htm", "swift", "txt", "md", "csv", "json", "css", "js", "ts", "jsx", "tsx", "xml", "yaml", "yml", "sh", "c", "cpp", "h", "java", "go", "rs", "log", "ini", "toml"]
     private var ext: String { (filename as NSString).pathExtension.lowercased() }
     private var isText: Bool { Self.textExts.contains(ext) }
     private var isHTML: Bool { ext == "html" || ext == "htm" }
 
+    private func ensureDownloaded() async -> URL? {
+        if let u = exportedURL { return u }
+        loading = true
+        errorText = nil
+        let res = await app.downloadArtifact(filename)
+        loading = false
+        if let u = res.url {
+            exportedURL = u
+            return u
+        }
+        let msg = res.error ?? "Could not load artifact."
+        errorText = msg
+        app.flash(msg)
+        return nil
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 Image(systemName: "doc.fill")
                     .font(.system(size: 18, weight: .semibold))
@@ -7279,26 +7305,29 @@ struct ArtifactCard: View {
                     .background(Pal.blue.opacity(0.14), in: RoundedRectangle(cornerRadius: 10))
                 VStack(alignment: .leading, spacing: 2) {
                     Text(filename).font(.subheadline.weight(.medium)).lineLimit(1)
-                    Text("Artifact file").font(.caption).foregroundStyle(.secondary)
+                    Text(errorText ?? "Artifact file")
+                        .font(.caption)
+                        .foregroundStyle(errorText != nil ? .red : .secondary)
+                        .lineLimit(2)
                 }
                 Spacer(minLength: 6)
                 if isText {
-                    Button(isHTML ? "View / Run" : "View") {
+                    Button {
+                        guard !loading else { return }
                         Task {
-                            if textPreview == nil {
-                                if exportedURL == nil {
-                                    exportedURL = await app.downloadArtifact(filename)
-                                }
-                                if let u = exportedURL {
-                                    textPreview = try? String(contentsOf: u, encoding: .utf8)
-                                }
+                            if textPreview == nil, let u = await ensureDownloaded() {
+                                textPreview = try? String(contentsOf: u, encoding: .utf8)
+                                if textPreview == nil { errorText = "Could not decode text."; app.flash("Could not decode text.") }
                             }
                             if textPreview != nil { showPreview = true }
                         }
+                    } label: {
+                        Text(isHTML ? "View / Run" : "View")
+                            .font(.subheadline.weight(.medium))
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(Pal.blue.opacity(0.15), in: Capsule())
+                            .contentShape(Capsule())
                     }
-                    .font(.subheadline.weight(.medium))
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(Pal.blue.opacity(0.15), in: Capsule())
                     .buttonStyle(.plain)
                 }
                 if let u = exportedURL {
@@ -7311,20 +7340,20 @@ struct ArtifactCard: View {
                 } else {
                     Button {
                         guard !loading else { return }
-                        loading = true
-                        Task {
-                            exportedURL = await app.downloadArtifact(filename)
-                            loading = false
-                        }
+                        Task { _ = await ensureDownloaded() }
                     } label: {
-                        if loading {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Text("Download")
-                                .font(.subheadline.weight(.medium))
-                                .padding(.horizontal, 10).padding(.vertical, 6)
-                                .background(Pal.blue.opacity(0.15), in: Capsule())
+                        Group {
+                            if loading {
+                                ProgressView().controlSize(.small)
+                                    .padding(.horizontal, 10).padding(.vertical, 6)
+                            } else {
+                                Text("Download")
+                                    .font(.subheadline.weight(.medium))
+                                    .padding(.horizontal, 10).padding(.vertical, 6)
+                                    .background(Pal.blue.opacity(0.15), in: Capsule())
+                            }
                         }
+                        .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
                 }
@@ -7345,31 +7374,6 @@ struct ArtifactCard: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showPreview = false } } }
             }
-        }
-    }
-}
-
-struct WorkspaceCommandBlock: View {
-    let code: String
-    let open: Bool
-    @State private var expanded = false
-
-    var body: some View {
-        if open {
-            HStack(spacing: 8) {
-                ThinkingDots()
-                Text("Generating Command").font(.caption).foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
-        } else {
-            DisclosureGroup("Run Command", isExpanded: $expanded) {
-                CodeBlock(lang: "python", code: code, open: false, note: nil)
-                    .padding(.top, 6)
-            }
-            .font(.subheadline.weight(.medium))
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
         }
     }
 }
