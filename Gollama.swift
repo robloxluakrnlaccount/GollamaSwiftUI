@@ -782,11 +782,11 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         synth.delegate = self
     }
 
-    func speak(_ text: String) {
+    func speak(_ text: String, language: String? = nil, rate: Float? = nil) {
         stop()
         let u = AVSpeechUtterance(string: text)
-        u.voice = Self.voice(for: text)
-        u.rate = AVSpeechUtteranceDefaultSpeechRate
+        u.voice = language.flatMap { Self.voice(language: $0) } ?? Self.voice(for: text)
+        u.rate = min(max(rate ?? AVSpeechUtteranceDefaultSpeechRate, AVSpeechUtteranceMinimumSpeechRate), AVSpeechUtteranceMaximumSpeechRate)
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
         try? AVAudioSession.sharedInstance().setActive(true)
         current = u
@@ -796,6 +796,15 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
     func stop() {
         current = nil
         if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }
+    }
+
+    /// The best installed voice for an exact locale such as en-GB (falls back to any voice of that language).
+    private static func voice(language: String) -> AVSpeechSynthesisVoice? {
+        let want = language.replacingOccurrences(of: "_", with: "-")
+        let base = String(want.prefix(2))
+        let all = AVSpeechSynthesisVoice.speechVoices()
+        func best(_ list: [AVSpeechSynthesisVoice]) -> AVSpeechSynthesisVoice? { list.max(by: { $0.quality.rawValue < $1.quality.rawValue }) }
+        return best(all.filter { $0.language == want }) ?? best(all.filter { $0.language.hasPrefix(base) }) ?? AVSpeechSynthesisVoice(language: want)
     }
 
     /// Picks the best installed voice for the language the text is written in.
@@ -899,6 +908,15 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         speech.onFinish = { [weak self] in Task { @MainActor in self?.speakingKey = nil } }
         speakingKey = key
         speech.speak(text)
+    }
+
+    /// The speaker button on a pronunciation card: the device's own voice for that accent, optionally slowed down.
+    func speakPron(word: String, language: String, slow: Bool, key: String) {
+        if speakingKey == key { speech.stop(); speakingKey = nil; return }
+        speech.onFinish = { [weak self] in Task { @MainActor in self?.speakingKey = nil } }
+        speakingKey = key
+        let base = AVSpeechUtteranceDefaultSpeechRate
+        speech.speak(word, language: language, rate: slow ? base * 0.55 : base * 0.9)
     }
 
     func stopSpeech() { speech.stop(); speakingKey = nil }
@@ -1563,8 +1581,82 @@ struct HighlightRenderer: TextRenderer {
     }
 }
 
+/// One accent of a pronunciation card, e.g. British: MANG·goh
+struct PronVariant: Hashable {
+    var label: String
+    var say: String
+}
+
+/// [[pronounce: Mango | British: MANG·goh | American: MANG·goh | @<url-encoded dictionary json>]]
+struct PronCard: Hashable {
+    var word: String
+    var variants: [PronVariant]
+    var ipa: [String: String] = [:]      // "British" -> "/ˈmaŋɡəʊ/"
+    var anyIPA: [String] = []
+
+    static func parse(_ body: String) -> PronCard? {
+        var parts = body.components(separatedBy: "|").map { $0.trimmed }
+        guard !parts.isEmpty else { return nil }
+        let word = String(parts.removeFirst().replacingOccurrences(of: "*", with: "").prefix(60)).trimmed
+        var variants: [PronVariant] = []
+        var ipa: [String: String] = [:]
+        var anyIPA: [String] = []
+        for p in parts {
+            if p.hasPrefix("@") {
+                let enc = String(p.dropFirst()).trimmed
+                if let json = enc.removingPercentEncoding, let data = json.data(using: .utf8),
+                   let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    ipa = (o["ipa"] as? [String: String]) ?? [:]
+                    anyIPA = (o["any"] as? [String]) ?? []
+                }
+                continue
+            }
+            let colon = p.firstIndex(of: ":").flatMap { $0 == p.startIndex ? nil : $0 }
+            let say = (colon.map { String(p[p.index(after: $0)...]) } ?? p).replacingOccurrences(of: "*", with: "").trimmed
+            let label = (colon.map { String(p[..<$0]) } ?? "")
+                .replacingOccurrences(of: #"\s*pronunciation$"#, with: "", options: [.regularExpression, .caseInsensitive]).trimmed
+            if !say.isEmpty { variants.append(PronVariant(label: label, say: say)) }
+        }
+        guard !word.isEmpty, !variants.isEmpty else { return nil }
+        return PronCard(word: word, variants: variants, ipa: ipa, anyIPA: anyIPA)
+    }
+
+    private static func match(_ label: String, _ pattern: String) -> Bool {
+        label.range(of: "(?i)" + pattern, options: .regularExpression) != nil
+    }
+
+    static func accent(_ label: String) -> String? {
+        if match(label, #"brit|\buk\b"#) { return "British" }
+        if match(label, #"americ|\bus\b|\busa\b"#) { return "American" }
+        if match(label, "austral") { return "Australian" }
+        if match(label, "canad") { return "Canadian" }
+        return nil
+    }
+
+    /// The voice locale for a label like "British", "French" or "Mexican Spanish".
+    static func language(for label: String) -> String {
+        let table: [(String, String)] = [
+            (#"brit|\buk\b|england|scot|welsh"#, "en-GB"), (#"americ|\bus\b|\busa\b"#, "en-US"), ("austral", "en-AU"), ("canad", "en-CA"),
+            ("indian", "en-IN"), ("irish", "en-IE"), ("french", "fr-FR"), ("mexic", "es-MX"), ("spanish|castilian", "es-ES"),
+            ("german", "de-DE"), ("ital", "it-IT"), ("brazil", "pt-BR"), ("portug", "pt-PT"), ("japan", "ja-JP"), ("korean", "ko-KR"),
+            ("mandarin|chinese", "zh-CN"), ("cantonese", "zh-HK"), ("russian", "ru-RU"), ("arabic", "ar-SA"), ("hindi", "hi-IN"),
+            ("dutch", "nl-NL"), ("swedish", "sv-SE"), ("turk", "tr-TR"), ("polish", "pl-PL"), ("greek", "el-GR")
+        ]
+        return table.first(where: { match(label, $0.0) })?.1 ?? "en-US"
+    }
+
+    /// The dictionary is English, so its IPA is never shown under another language.
+    func ipa(for v: PronVariant) -> String {
+        let acc = Self.accent(v.label)
+        let english = v.label.isEmpty || acc != nil || v.label.range(of: "english", options: .caseInsensitive) != nil
+        if let acc, let t = ipa[acc] { return t }
+        if english, let t = anyIPA.first { return t }
+        return ""
+    }
+}
+
 struct ABlock: Identifiable {
-    enum Kind { case para, heading, item, quote, table, rule, code, live, math, image }
+    enum Kind { case para, heading, item, quote, table, rule, code, live, math, image, pron }
     let id: Int
     var kind: Kind
     var level = 0
@@ -1577,6 +1669,7 @@ struct ABlock: Identifiable {
     var lang = ""
     var open = false
     var cells: [[Text]] = []
+    var pron: PronCard?
 }
 
 enum AnswerParser {
@@ -1589,6 +1682,7 @@ enum AnswerParser {
         var lang = ""
         var open = false
         var rows: [[String]] = []
+        var pron: PronCard?
     }
 
     struct Parsed {
@@ -1600,6 +1694,7 @@ enum AnswerParser {
         var sends: [String] = []
         var labels: [String] = []
         var maths: [String] = []
+        var prons: [PronCard] = []
         var hl = 0
         let sourceCount: Int
         init(_ n: Int) { sourceCount = n }
@@ -1623,6 +1718,8 @@ enum AnswerParser {
     private static let reUnclosedSingle = rxc(#"\[\s*suggest(?:ion)?\s*:[^\]\[]*$"#, [.caseInsensitive])
     private static let reUnclosedCite = rxc(#"\[[\d\s,\[]*$"#)
     private static let reImageTag = rxc(#"\[image:\s*[^\]]{2,100}\]"#, [.caseInsensitive])
+    private static let rePronTag = rxc(#"\[\[\s*pronounce\s*:\s*([^\]]{2,2500})\]\]"#, [.caseInsensitive])
+    private static let rePronLine = rxc("^\u{E040}(\\d+)\u{E041}$")
     private static let reWrapTag = rxc(#"\[\s*(\[{2,3}\s*(?:suggest(?:ion)?|ask|say|reply)\s*:[^\]]*\]{2,3})\s*\]"#, [.caseInsensitive])
     private static let reSugg = rxc(#"\[{2,3}\s*(?:suggest(?:ion)?|ask|say|reply)\s*:\s*([^\]]{2,500})\]{2,3}|\[\s*suggest(?:ion)?\s*:\s*([^\]\[]{2,500})\]"#, [.caseInsensitive])
     private static let reCodeSpan = rxc("`[^`\\n]*`")
@@ -1664,6 +1761,7 @@ enum AnswerParser {
             b.raw = d.raw
             b.lang = d.lang
             b.open = d.open
+            b.pron = d.pron
             switch d.kind {
             case .para, .heading, .item, .quote:
                 let (clean, cites) = extractCites(d.raw, count: c.sourceCount)
@@ -1776,6 +1874,13 @@ enum AnswerParser {
         s = sub(reUnclosedCite, s, "")
         s = sub(reImageTag, s, "")
 
+        // pronunciation cards: [[pronounce: Word | British: MANG·goh | ... | @data]] -> a card on its own line (at most 3)
+        s = replaceMatches(rePronTag, in: s) { m, ns in
+            guard c.prons.count < 3, let card = PronCard.parse(grp(m, ns, 1) ?? "") else { return "" }
+            c.prons.append(card)
+            return "\n\u{E040}\(c.prons.count - 1)\u{E041}\n"
+        }
+
         // follow-ups: [[suggest: ...]] (also suggestion / ask / say / reply, 2-3 brackets, wrapped or single-bracket)
         s = sub(reWrapTag, s, "$1")
         s = replaceMatches(reSugg, in: s) { m, ns in
@@ -1886,6 +1991,18 @@ enum AnswerParser {
                 var d = Draft(kind: .math)
                 d.raw = idx < c.maths.count ? c.maths[idx] : ""
                 out.append(d)
+                i += 1
+                continue
+            }
+            if let m = rePronLine.firstMatch(in: t, range: NSRange(location: 0, length: tns.length)) {
+                flush()
+                stack = []
+                let idx = Int(tns.substring(with: m.range(at: 1))) ?? 0
+                if idx < c.prons.count {
+                    var d = Draft(kind: .pron)
+                    d.pron = c.prons[idx]
+                    out.append(d)
+                }
                 i += 1
                 continue
             }
@@ -2436,6 +2553,7 @@ struct TableBlock: View {
 struct BlockView: View {
     let b: ABlock
     let sources: [Hit]
+    var onSuggest: ((String) -> Void)?
 
     private static func headingFont(_ level: Int) -> Font {
         if level <= 1 { return Font.title2.bold() }
@@ -2477,6 +2595,8 @@ struct BlockView: View {
                 LiveHTMLBlock(code: b.raw, open: b.open)
             case .code:
                 CodeBlock(lang: b.lang, code: b.raw, open: b.open, note: b.marker == "run" ? "This Python block runs in the web app. Here it's shown as code." : nil)
+            case .pron:
+                if let p = b.pron { PronunciationCard(card: p, onSuggest: onSuggest) }
             case .image:
                 AsyncImage(url: URL(string: b.raw)) { p in
                     if let i = p.image { i.resizable().scaledToFit() }
@@ -2491,6 +2611,135 @@ struct BlockView: View {
     }
 }
 
+/// The pronunciation card: word, accent picker, "sounds like" respelling with the stressed syllable in bold,
+/// the dictionary IPA, a speaker button (the device's own voice for that accent), a Slow switch and a feedback row.
+struct PronunciationCard: View {
+    let card: PronCard
+    var onSuggest: ((String) -> Void)?
+    @Environment(AppModel.self) private var app
+    @State private var index = 0
+    @State private var slow = false
+    @State private var asked = false
+
+    private var variant: PronVariant { card.variants[min(index, card.variants.count - 1)] }
+    private var speakKey: String { "pron:\(card.word):\(index)" }
+    private var speaking: Bool { app.speakingKey == speakKey }
+
+    private func title(_ v: PronVariant) -> String {
+        String(format: tr("%@ pronunciation"), v.label.isEmpty ? tr("Standard") : v.label)
+    }
+
+    private func select(_ i: Int) {
+        if speaking { app.stopSpeech() }
+        index = i
+    }
+
+    /// MANG·goh -> bold "mang", light "goh". With no capitals every syllable is bold.
+    private func syllables(_ say: String) -> Text {
+        let words = say.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        func caps(_ x: String) -> Bool { x.contains(where: { $0.isUppercase }) && x == x.uppercased() }
+        var out = Text("")
+        for (wi, w) in words.enumerated() {
+            let syl = w.split(whereSeparator: { "·‧.-\u{2022}".contains($0) }).map(String.init)
+            let anyCaps = syl.contains(where: caps)
+            for (i, x) in syl.enumerated() {
+                let on = !anyCaps || caps(x)
+                if i > 0 { out = out + Text("·").font(.system(size: 22)).foregroundStyle(Color.secondary) }
+                out = out + Text(x.lowercased()).fontWeight(on ? .bold : .regular).foregroundStyle(on ? Color.primary : Color.secondary)
+            }
+            if wi < words.count - 1 { out = out + Text("   ") }
+        }
+        return out
+    }
+
+    var body: some View {
+        let ipa = card.ipa(for: variant)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                Text(card.word).font(.headline).lineLimit(1)
+                Spacer(minLength: 8)
+                if card.variants.count > 1 {
+                    Menu {
+                        ForEach(Array(card.variants.enumerated()), id: \.offset) { i, v in
+                            Button { select(i) } label: {
+                                if i == index { Label(title(v), systemImage: "checkmark") } else { Text(title(v)) }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(title(variant))
+                            Image(systemName: "chevron.down").font(.caption.weight(.semibold))
+                        }
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.primary)
+                    }
+                } else {
+                    Text(title(variant)).font(.subheadline.weight(.medium))
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(tr("Sounds like")).font(.subheadline).foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    syllables(variant.say)
+                        .font(.system(size: 30))
+                        .lineLimit(3)
+                        .minimumScaleFactor(0.6)
+                    Button {
+                        app.speakPron(word: card.word, language: PronCard.language(for: variant.label), slow: slow, key: speakKey)
+                    } label: {
+                        Image(systemName: speaking ? "speaker.wave.3.fill" : "speaker.wave.2")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundStyle(speaking ? Pal.blue : Color.primary)
+                            .symbolEffect(.variableColor.iterative, isActive: speaking)
+                            .frame(width: 40, height: 40)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(tr("Speak"))
+                    Spacer(minLength: 0)
+                }
+                if !ipa.isEmpty {
+                    Text(ipa).font(.callout).foregroundStyle(.secondary)
+                }
+                Toggle(isOn: $slow) { Text(tr("Slow")).font(.subheadline) }
+                    .fixedSize()
+                    .padding(.top, 10)
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 16)
+            .padding(.bottom, 4)
+
+            HStack(spacing: 8) {
+                Spacer()
+                if asked {
+                    Text(tr("Sounds wrong?")).foregroundStyle(.secondary)
+                    Button(tr("Ask the AI to double-check")) {
+                        onSuggest?("Please double-check how to pronounce \"\(card.word)\" and correct the card if it is wrong.")
+                    }
+                    .foregroundStyle(Pal.blue)
+                } else {
+                    Button(tr("Feedback")) { asked = true }
+                        .italic()
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.caption)
+            .buttonStyle(.plain)
+            .padding(.horizontal, 18)
+            .padding(.bottom, 12)
+        }
+        .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Color(.secondarySystemBackground)))
+        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(Color.primary.opacity(0.1), lineWidth: 1))
+        .frame(maxWidth: 540, alignment: .leading)
+        .padding(.vertical, 4)
+    }
+}
+
 struct MarkdownView: View {
     let text: String
     let sources: [Hit]
@@ -2501,7 +2750,7 @@ struct MarkdownView: View {
     var body: some View {
         let parsed = AnswerParser.parse(text, sourceCount: sources.count, fadeTail: fading ? 16 : 0)
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(parsed.blocks) { b in BlockView(b: b, sources: sources) }
+            ForEach(parsed.blocks) { b in BlockView(b: b, sources: sources, onSuggest: onSuggest) }
         }
         .font(.body)
         .lineSpacing(3)
@@ -4457,7 +4706,15 @@ enum L10n {
         "Total": "Total",
         "Clear saved videos": "Borrar vídeos guardados",
         "Usage": "Uso",
-        "Your chats live on the server, so clearing storage never deletes them.": "Tus chats están en el servidor, así que liberar almacenamiento nunca los elimina."
+        "Your chats live on the server, so clearing storage never deletes them.": "Tus chats están en el servidor, así que liberar almacenamiento nunca los elimina.",
+        "Sounds like": "Suena como",
+        "Slow": "Lento",
+        "Feedback": "Comentarios",
+        "Sounds wrong?": "¿Suena mal?",
+        "Ask the AI to double-check": "Pedir a la IA que lo revise",
+        "%@ pronunciation": "Pronunciación %@",
+        "Standard": "Estándar",
+        "Speak": "Pronunciar"
     ]
     static let fr: [String: String] = [
         "Settings": "Réglages",
@@ -4558,7 +4815,15 @@ enum L10n {
         "Total": "Total",
         "Clear saved videos": "Supprimer les vidéos enregistrées",
         "Usage": "Utilisation",
-        "Your chats live on the server, so clearing storage never deletes them.": "Vos discussions sont sur le serveur : libérer du stockage ne les supprime jamais."
+        "Your chats live on the server, so clearing storage never deletes them.": "Vos discussions sont sur le serveur : libérer du stockage ne les supprime jamais.",
+        "Sounds like": "Se prononce",
+        "Slow": "Lent",
+        "Feedback": "Commentaires",
+        "Sounds wrong?": "Ça sonne faux ?",
+        "Ask the AI to double-check": "Demander à l'IA de vérifier",
+        "%@ pronunciation": "Prononciation %@",
+        "Standard": "Standard",
+        "Speak": "Prononcer"
     ]
     static let de: [String: String] = [
         "Settings": "Einstellungen",
@@ -4659,7 +4924,15 @@ enum L10n {
         "Total": "Gesamt",
         "Clear saved videos": "Gespeicherte Videos löschen",
         "Usage": "Belegung",
-        "Your chats live on the server, so clearing storage never deletes them.": "Deine Chats liegen auf dem Server, daher werden sie beim Leeren nie gelöscht."
+        "Your chats live on the server, so clearing storage never deletes them.": "Deine Chats liegen auf dem Server, daher werden sie beim Leeren nie gelöscht.",
+        "Sounds like": "Klingt wie",
+        "Slow": "Langsam",
+        "Feedback": "Feedback",
+        "Sounds wrong?": "Klingt falsch?",
+        "Ask the AI to double-check": "KI bitten, es zu prüfen",
+        "%@ pronunciation": "%@ Aussprache",
+        "Standard": "Standard",
+        "Speak": "Sprechen"
     ]
     static let it: [String: String] = [
         "Settings": "Impostazioni",
@@ -4760,7 +5033,15 @@ enum L10n {
         "Total": "Totale",
         "Clear saved videos": "Elimina video salvati",
         "Usage": "Utilizzo",
-        "Your chats live on the server, so clearing storage never deletes them.": "Le chat sono sul server, quindi liberare spazio non le elimina mai."
+        "Your chats live on the server, so clearing storage never deletes them.": "Le chat sono sul server, quindi liberare spazio non le elimina mai.",
+        "Sounds like": "Si pronuncia",
+        "Slow": "Lento",
+        "Feedback": "Feedback",
+        "Sounds wrong?": "Suona male?",
+        "Ask the AI to double-check": "Chiedi all'IA di ricontrollare",
+        "%@ pronunciation": "Pronuncia %@",
+        "Standard": "Standard",
+        "Speak": "Pronuncia"
     ]
     static let pt: [String: String] = [
         "Settings": "Ajustes",
@@ -4861,7 +5142,15 @@ enum L10n {
         "Total": "Total",
         "Clear saved videos": "Limpar vídeos salvos",
         "Usage": "Uso",
-        "Your chats live on the server, so clearing storage never deletes them.": "Suas conversas ficam no servidor, então limpar o armazenamento nunca as exclui."
+        "Your chats live on the server, so clearing storage never deletes them.": "Suas conversas ficam no servidor, então limpar o armazenamento nunca as exclui.",
+        "Sounds like": "Soa como",
+        "Slow": "Lento",
+        "Feedback": "Feedback",
+        "Sounds wrong?": "Soa errado?",
+        "Ask the AI to double-check": "Pedir à IA para verificar",
+        "%@ pronunciation": "Pronúncia %@",
+        "Standard": "Padrão",
+        "Speak": "Falar"
     ]
     static let nl: [String: String] = [
         "Settings": "Instellingen",
@@ -4962,7 +5251,15 @@ enum L10n {
         "Total": "Totaal",
         "Clear saved videos": "Opgeslagen video's wissen",
         "Usage": "Gebruik",
-        "Your chats live on the server, so clearing storage never deletes them.": "Je chats staan op de server, dus opslag wissen verwijdert ze nooit."
+        "Your chats live on the server, so clearing storage never deletes them.": "Je chats staan op de server, dus opslag wissen verwijdert ze nooit.",
+        "Sounds like": "Klinkt als",
+        "Slow": "Langzaam",
+        "Feedback": "Feedback",
+        "Sounds wrong?": "Klinkt het verkeerd?",
+        "Ask the AI to double-check": "Vraag de AI om te controleren",
+        "%@ pronunciation": "%@ uitspraak",
+        "Standard": "Standaard",
+        "Speak": "Uitspreken"
     ]
     static let sv: [String: String] = [
         "Settings": "Inställningar",
@@ -5063,7 +5360,15 @@ enum L10n {
         "Total": "Totalt",
         "Clear saved videos": "Rensa sparade videor",
         "Usage": "Användning",
-        "Your chats live on the server, so clearing storage never deletes them.": "Dina chattar finns på servern, så att rensa lagring tar aldrig bort dem."
+        "Your chats live on the server, so clearing storage never deletes them.": "Dina chattar finns på servern, så att rensa lagring tar aldrig bort dem.",
+        "Sounds like": "Låter som",
+        "Slow": "Långsamt",
+        "Feedback": "Feedback",
+        "Sounds wrong?": "Låter det fel?",
+        "Ask the AI to double-check": "Be AI:n dubbelkolla",
+        "%@ pronunciation": "%@ uttal",
+        "Standard": "Standard",
+        "Speak": "Uttala"
     ]
     static let pl: [String: String] = [
         "Settings": "Ustawienia",
@@ -5164,7 +5469,15 @@ enum L10n {
         "Total": "Razem",
         "Clear saved videos": "Usuń zapisane filmy",
         "Usage": "Wykorzystanie",
-        "Your chats live on the server, so clearing storage never deletes them.": "Twoje czaty są na serwerze, więc czyszczenie pamięci nigdy ich nie usuwa."
+        "Your chats live on the server, so clearing storage never deletes them.": "Twoje czaty są na serwerze, więc czyszczenie pamięci nigdy ich nie usuwa.",
+        "Sounds like": "Brzmi jak",
+        "Slow": "Wolno",
+        "Feedback": "Opinia",
+        "Sounds wrong?": "Brzmi źle?",
+        "Ask the AI to double-check": "Poproś AI o sprawdzenie",
+        "%@ pronunciation": "Wymowa: %@",
+        "Standard": "Standardowa",
+        "Speak": "Odtwórz"
     ]
     static let tr: [String: String] = [
         "Settings": "Ayarlar",
@@ -5265,7 +5578,15 @@ enum L10n {
         "Total": "Toplam",
         "Clear saved videos": "Kaydedilen videoları temizle",
         "Usage": "Kullanım",
-        "Your chats live on the server, so clearing storage never deletes them.": "Sohbetleriniz sunucuda durur; depolamayı temizlemek onları asla silmez."
+        "Your chats live on the server, so clearing storage never deletes them.": "Sohbetleriniz sunucuda durur; depolamayı temizlemek onları asla silmez.",
+        "Sounds like": "Okunuşu",
+        "Slow": "Yavaş",
+        "Feedback": "Geri bildirim",
+        "Sounds wrong?": "Yanlış mı geliyor?",
+        "Ask the AI to double-check": "Yapay zekadan kontrol etmesini iste",
+        "%@ pronunciation": "%@ telaffuz",
+        "Standard": "Standart",
+        "Speak": "Seslendir"
     ]
     static let ru: [String: String] = [
         "Settings": "Настройки",
@@ -5366,7 +5687,15 @@ enum L10n {
         "Total": "Итого",
         "Clear saved videos": "Удалить сохранённые видео",
         "Usage": "Использование",
-        "Your chats live on the server, so clearing storage never deletes them.": "Ваши чаты хранятся на сервере, поэтому очистка хранилища их не удаляет."
+        "Your chats live on the server, so clearing storage never deletes them.": "Ваши чаты хранятся на сервере, поэтому очистка хранилища их не удаляет.",
+        "Sounds like": "Звучит как",
+        "Slow": "Медленно",
+        "Feedback": "Отзыв",
+        "Sounds wrong?": "Звучит неверно?",
+        "Ask the AI to double-check": "Попросить ИИ перепроверить",
+        "%@ pronunciation": "Произношение: %@",
+        "Standard": "Стандартное",
+        "Speak": "Произнести"
     ]
     static let uk: [String: String] = [
         "Settings": "Налаштування",
@@ -5467,7 +5796,15 @@ enum L10n {
         "Total": "Разом",
         "Clear saved videos": "Видалити збережені відео",
         "Usage": "Використання",
-        "Your chats live on the server, so clearing storage never deletes them.": "Ваші чати зберігаються на сервері, тож очищення сховища їх не видаляє."
+        "Your chats live on the server, so clearing storage never deletes them.": "Ваші чати зберігаються на сервері, тож очищення сховища їх не видаляє.",
+        "Sounds like": "Звучить як",
+        "Slow": "Повільно",
+        "Feedback": "Відгук",
+        "Sounds wrong?": "Звучить неправильно?",
+        "Ask the AI to double-check": "Попросити ШІ перевірити",
+        "%@ pronunciation": "Вимова: %@",
+        "Standard": "Стандартна",
+        "Speak": "Вимовити"
     ]
     static let ar: [String: String] = [
         "Settings": "الإعدادات",
@@ -5568,7 +5905,15 @@ enum L10n {
         "Total": "الإجمالي",
         "Clear saved videos": "مسح الفيديوهات المحفوظة",
         "Usage": "الاستخدام",
-        "Your chats live on the server, so clearing storage never deletes them.": "محادثاتك محفوظة على الخادم، لذا لا يؤدي مسح التخزين إلى حذفها أبداً."
+        "Your chats live on the server, so clearing storage never deletes them.": "محادثاتك محفوظة على الخادم، لذا لا يؤدي مسح التخزين إلى حذفها أبداً.",
+        "Sounds like": "يُنطق مثل",
+        "Slow": "بطيء",
+        "Feedback": "ملاحظات",
+        "Sounds wrong?": "هل يبدو خاطئاً؟",
+        "Ask the AI to double-check": "اطلب من الذكاء الاصطناعي التحقق",
+        "%@ pronunciation": "نطق %@",
+        "Standard": "قياسي",
+        "Speak": "نطق"
     ]
     static let he: [String: String] = [
         "Settings": "הגדרות",
@@ -5669,7 +6014,15 @@ enum L10n {
         "Total": "סה״כ",
         "Clear saved videos": "מחק סרטונים שמורים",
         "Usage": "שימוש",
-        "Your chats live on the server, so clearing storage never deletes them.": "הצ'אטים שלך נשמרים בשרת, ולכן ניקוי האחסון לא מוחק אותם לעולם."
+        "Your chats live on the server, so clearing storage never deletes them.": "הצ'אטים שלך נשמרים בשרת, ולכן ניקוי האחסון לא מוחק אותם לעולם.",
+        "Sounds like": "נשמע כמו",
+        "Slow": "לאט",
+        "Feedback": "משוב",
+        "Sounds wrong?": "נשמע לא נכון?",
+        "Ask the AI to double-check": "בקשו מה-AI לבדוק שוב",
+        "%@ pronunciation": "ההגייה: %@",
+        "Standard": "רגיל",
+        "Speak": "השמע"
     ]
     static let hi: [String: String] = [
         "Settings": "सेटिंग्स",
@@ -5770,7 +6123,15 @@ enum L10n {
         "Total": "कुल",
         "Clear saved videos": "सहेजे गए वीडियो साफ़ करें",
         "Usage": "उपयोग",
-        "Your chats live on the server, so clearing storage never deletes them.": "आपकी चैट सर्वर पर रहती हैं, इसलिए स्टोरेज साफ़ करने से वे कभी नहीं हटतीं।"
+        "Your chats live on the server, so clearing storage never deletes them.": "आपकी चैट सर्वर पर रहती हैं, इसलिए स्टोरेज साफ़ करने से वे कभी नहीं हटतीं।",
+        "Sounds like": "ऐसा सुनाई देता है",
+        "Slow": "धीमा",
+        "Feedback": "फ़ीडबैक",
+        "Sounds wrong?": "गलत लग रहा है?",
+        "Ask the AI to double-check": "AI से दोबारा जाँचने को कहें",
+        "%@ pronunciation": "%@ उच्चारण",
+        "Standard": "मानक",
+        "Speak": "बोलें"
     ]
     static let th: [String: String] = [
         "Settings": "การตั้งค่า",
@@ -5871,7 +6232,15 @@ enum L10n {
         "Total": "รวม",
         "Clear saved videos": "ล้างวิดีโอที่บันทึกไว้",
         "Usage": "การใช้งาน",
-        "Your chats live on the server, so clearing storage never deletes them.": "แชตของคุณอยู่บนเซิร์ฟเวอร์ ดังนั้นการล้างพื้นที่จัดเก็บจะไม่ลบแชตเหล่านั้น"
+        "Your chats live on the server, so clearing storage never deletes them.": "แชตของคุณอยู่บนเซิร์ฟเวอร์ ดังนั้นการล้างพื้นที่จัดเก็บจะไม่ลบแชตเหล่านั้น",
+        "Sounds like": "ออกเสียงว่า",
+        "Slow": "ช้า",
+        "Feedback": "ความคิดเห็น",
+        "Sounds wrong?": "ฟังดูไม่ถูกต้อง?",
+        "Ask the AI to double-check": "ให้ AI ตรวจสอบอีกครั้ง",
+        "%@ pronunciation": "การออกเสียงแบบ %@",
+        "Standard": "มาตรฐาน",
+        "Speak": "พูด"
     ]
     static let vi: [String: String] = [
         "Settings": "Cài đặt",
@@ -5972,7 +6341,15 @@ enum L10n {
         "Total": "Tổng cộng",
         "Clear saved videos": "Xóa video đã lưu",
         "Usage": "Mức sử dụng",
-        "Your chats live on the server, so clearing storage never deletes them.": "Cuộc trò chuyện nằm trên máy chủ nên việc dọn dung lượng không bao giờ xóa chúng."
+        "Your chats live on the server, so clearing storage never deletes them.": "Cuộc trò chuyện nằm trên máy chủ nên việc dọn dung lượng không bao giờ xóa chúng.",
+        "Sounds like": "Phát âm như",
+        "Slow": "Chậm",
+        "Feedback": "Phản hồi",
+        "Sounds wrong?": "Nghe sai?",
+        "Ask the AI to double-check": "Nhờ AI kiểm tra lại",
+        "%@ pronunciation": "Phát âm %@",
+        "Standard": "Chuẩn",
+        "Speak": "Đọc"
     ]
     static let idn: [String: String] = [
         "Settings": "Pengaturan",
@@ -6073,7 +6450,15 @@ enum L10n {
         "Total": "Total",
         "Clear saved videos": "Hapus video tersimpan",
         "Usage": "Penggunaan",
-        "Your chats live on the server, so clearing storage never deletes them.": "Obrolan Anda ada di server, jadi membersihkan penyimpanan tidak akan menghapusnya."
+        "Your chats live on the server, so clearing storage never deletes them.": "Obrolan Anda ada di server, jadi membersihkan penyimpanan tidak akan menghapusnya.",
+        "Sounds like": "Terdengar seperti",
+        "Slow": "Lambat",
+        "Feedback": "Masukan",
+        "Sounds wrong?": "Terdengar salah?",
+        "Ask the AI to double-check": "Minta AI memeriksa ulang",
+        "%@ pronunciation": "Pelafalan %@",
+        "Standard": "Standar",
+        "Speak": "Ucapkan"
     ]
     static let ja: [String: String] = [
         "Settings": "設定",
@@ -6174,7 +6559,15 @@ enum L10n {
         "Total": "合計",
         "Clear saved videos": "保存した動画を消去",
         "Usage": "使用状況",
-        "Your chats live on the server, so clearing storage never deletes them.": "チャットはサーバーに保存されているため、ストレージを消去しても削除されません。"
+        "Your chats live on the server, so clearing storage never deletes them.": "チャットはサーバーに保存されているため、ストレージを消去しても削除されません。",
+        "Sounds like": "発音",
+        "Slow": "ゆっくり",
+        "Feedback": "フィードバック",
+        "Sounds wrong?": "発音が違いますか？",
+        "Ask the AI to double-check": "AI に再確認を依頼",
+        "%@ pronunciation": "%@の発音",
+        "Standard": "標準",
+        "Speak": "読み上げ"
     ]
     static let ko: [String: String] = [
         "Settings": "설정",
@@ -6275,7 +6668,15 @@ enum L10n {
         "Total": "합계",
         "Clear saved videos": "저장된 동영상 지우기",
         "Usage": "사용량",
-        "Your chats live on the server, so clearing storage never deletes them.": "채팅은 서버에 저장되므로 저장 공간을 지워도 삭제되지 않습니다."
+        "Your chats live on the server, so clearing storage never deletes them.": "채팅은 서버에 저장되므로 저장 공간을 지워도 삭제되지 않습니다.",
+        "Sounds like": "발음",
+        "Slow": "느리게",
+        "Feedback": "의견 보내기",
+        "Sounds wrong?": "발음이 이상한가요?",
+        "Ask the AI to double-check": "AI에게 다시 확인 요청",
+        "%@ pronunciation": "%@ 발음",
+        "Standard": "표준",
+        "Speak": "읽어 주기"
     ]
     static let zhHans: [String: String] = [
         "Settings": "设置",
@@ -6376,7 +6777,15 @@ enum L10n {
         "Total": "总计",
         "Clear saved videos": "清除已保存的视频",
         "Usage": "使用情况",
-        "Your chats live on the server, so clearing storage never deletes them.": "聊天记录保存在服务器上，因此清理存储空间不会删除它们。"
+        "Your chats live on the server, so clearing storage never deletes them.": "聊天记录保存在服务器上，因此清理存储空间不会删除它们。",
+        "Sounds like": "读音类似",
+        "Slow": "慢速",
+        "Feedback": "反馈",
+        "Sounds wrong?": "听起来不对？",
+        "Ask the AI to double-check": "让 AI 再检查一下",
+        "%@ pronunciation": "%@发音",
+        "Standard": "标准",
+        "Speak": "朗读"
     ]
     static let zhHant: [String: String] = [
         "Settings": "設定",
@@ -6477,7 +6886,15 @@ enum L10n {
         "Total": "總計",
         "Clear saved videos": "清除已儲存的影片",
         "Usage": "使用情況",
-        "Your chats live on the server, so clearing storage never deletes them.": "對話保存在伺服器上，因此清理儲存空間不會刪除它們。"
+        "Your chats live on the server, so clearing storage never deletes them.": "對話保存在伺服器上，因此清理儲存空間不會刪除它們。",
+        "Sounds like": "讀音類似",
+        "Slow": "慢速",
+        "Feedback": "回饋",
+        "Sounds wrong?": "聽起來不對？",
+        "Ask the AI to double-check": "請 AI 再檢查一次",
+        "%@ pronunciation": "%@發音",
+        "Standard": "標準",
+        "Speak": "朗讀"
     ]
     static let cs: [String: String] = [
         "Settings": "Nastavení",
@@ -6578,6 +6995,14 @@ enum L10n {
         "Total": "Celkem",
         "Clear saved videos": "Vymazat uložená videa",
         "Usage": "Využití",
-        "Your chats live on the server, so clearing storage never deletes them.": "Vaše chaty jsou na serveru, takže vymazání úložiště je nikdy neodstraní."
+        "Your chats live on the server, so clearing storage never deletes them.": "Vaše chaty jsou na serveru, takže vymazání úložiště je nikdy neodstraní.",
+        "Sounds like": "Zní jako",
+        "Slow": "Pomalu",
+        "Feedback": "Zpětná vazba",
+        "Sounds wrong?": "Zní to špatně?",
+        "Ask the AI to double-check": "Požádat AI o kontrolu",
+        "%@ pronunciation": "Výslovnost: %@",
+        "Standard": "Standardní",
+        "Speak": "Přečíst"
     ]
 }
