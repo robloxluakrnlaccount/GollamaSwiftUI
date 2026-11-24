@@ -21,7 +21,6 @@
   "groups" : [
     {
       "blend-mode" : "normal",
-      "blur-material" : null,
       "hidden" : false,
       "layers" : [
         {
