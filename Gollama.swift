@@ -1849,7 +1849,8 @@ enum AnswerParser {
 
     static let liveKinds: [String: String] = [
         "run.html": "html", "run-html": "html", "html.run": "html", "html-run": "html", "live.html": "html", "live-html": "html", "html-live": "html",
-        "run.python": "python", "run.py": "python", "run-python": "python", "python.run": "python", "python-run": "python", "py.run": "python", "py-run": "python", "live-python": "python"
+        "run.python": "python", "run.py": "python", "run-python": "python", "python.run": "python", "python-run": "python", "py.run": "python", "py-run": "python", "live-python": "python",
+        "run.workspace": "workspace", "run-workspace": "workspace", "workspace.python": "workspace", "workspace-python": "workspace", "artifact.python": "workspace", "artifact-python": "workspace"
     ]
 
     private static let reUnclosedTag = rxc(#"\[\[(?!\s*(?:hl|highlight|key)\s*:)[^\]]*$"#, [.caseInsensitive])
@@ -1964,6 +1965,7 @@ enum AnswerParser {
         d.open = open
         if kind == "html" { d.kind = .live; d.lang = "html" }
         else if kind == "python" { d.lang = "python"; d.marker = "run" }
+        else if kind == "workspace" { d.lang = "python"; d.marker = "workspace" }
         else { d.lang = first }
         return d
     }
@@ -2752,7 +2754,11 @@ struct BlockView: View {
             case .live:
                 LiveHTMLBlock(code: b.raw, open: b.open)
             case .code:
-                CodeBlock(lang: b.lang, code: b.raw, open: b.open, note: b.marker == "run" ? "This Python block runs in the web app. Here it's shown as code." : nil)
+                if b.marker == "workspace" {
+                    WorkspaceCommandBlock(code: b.raw, open: b.open)
+                } else {
+                    CodeBlock(lang: b.lang, code: b.raw, open: b.open, note: b.marker == "run" ? "This Python block runs in the web app. Here it's shown as code." : nil)
+                }
             case .pron:
                 if let p = b.pron { PronunciationCard(card: p, onSuggest: onSuggest) }
             case .artifact:
@@ -7255,48 +7261,111 @@ struct ArtifactCard: View {
     let filename: String
     @State private var loading = false
     @State private var exportedURL: URL?
+    @State private var textPreview: String?
+    @State private var showPreview = false
+
+    private static let textExts: Set<String> = ["py", "html", "htm", "swift", "txt", "md", "csv", "json", "css", "js", "ts", "jsx", "tsx", "xml", "yaml", "yml", "sh", "c", "cpp", "h", "java", "go", "rs", "log", "ini", "toml"]
+    private var ext: String { (filename as NSString).pathExtension.lowercased() }
+    private var isText: Bool { Self.textExts.contains(ext) }
+    private var isHTML: Bool { ext == "html" || ext == "htm" }
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "doc.fill")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(Pal.blue)
-                .frame(width: 36, height: 36)
-                .background(Pal.blue.opacity(0.14), in: RoundedRectangle(cornerRadius: 10))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(filename).font(.subheadline.weight(.medium)).lineLimit(1)
-                Text("Artifact file").font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 8)
-            if let u = exportedURL {
-                ShareLink(item: u) {
-                    Label("Save", systemImage: "square.and.arrow.up")
-                        .font(.subheadline.weight(.medium))
-                        .padding(.horizontal, 12).padding(.vertical, 6)
-                        .background(Pal.blue.opacity(0.15), in: Capsule())
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: "doc.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Pal.blue)
+                    .frame(width: 36, height: 36)
+                    .background(Pal.blue.opacity(0.14), in: RoundedRectangle(cornerRadius: 10))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(filename).font(.subheadline.weight(.medium)).lineLimit(1)
+                    Text("Artifact file").font(.caption).foregroundStyle(.secondary)
                 }
-            } else {
-                Button {
-                    guard !loading else { return }
-                    loading = true
-                    Task {
-                        exportedURL = await app.downloadArtifact(filename)
-                        loading = false
+                Spacer(minLength: 6)
+                if isText {
+                    Button(isHTML ? "View / Run" : "View") {
+                        Task {
+                            if textPreview == nil, let u = exportedURL ?? (await app.downloadArtifact(filename)) {
+                                exportedURL = u
+                                textPreview = try? String(contentsOf: u, encoding: .utf8)
+                            }
+                            if textPreview != nil { showPreview = true }
+                        }
                     }
-                } label: {
-                    if loading {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Text("Download")
+                    .font(.subheadline.weight(.medium))
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(Pal.blue.opacity(0.15), in: Capsule())
+                    .buttonStyle(.plain)
+                }
+                if let u = exportedURL {
+                    ShareLink(item: u) {
+                        Label("Save", systemImage: "square.and.arrow.up")
                             .font(.subheadline.weight(.medium))
-                            .padding(.horizontal, 12).padding(.vertical, 6)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
                             .background(Pal.blue.opacity(0.15), in: Capsule())
                     }
+                } else {
+                    Button {
+                        guard !loading else { return }
+                        loading = true
+                        Task {
+                            exportedURL = await app.downloadArtifact(filename)
+                            loading = false
+                        }
+                    } label: {
+                        if loading {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text("Download")
+                                .font(.subheadline.weight(.medium))
+                                .padding(.horizontal, 10).padding(.vertical, 6)
+                                .background(Pal.blue.opacity(0.15), in: Capsule())
+                        }
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
+            }
+            .padding(12)
+            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
+        }
+        .sheet(isPresented: $showPreview) {
+            NavigationStack {
+                ScrollView {
+                    if isHTML, let html = textPreview {
+                        LiveHTMLBlock(code: html, open: false).padding()
+                    } else if let txt = textPreview {
+                        CodeBlock(lang: ext.isEmpty ? "txt" : ext, code: txt, open: false, note: nil).padding()
+                    }
+                }
+                .navigationTitle(filename)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showPreview = false } } }
             }
         }
-        .padding(12)
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+struct WorkspaceCommandBlock: View {
+    let code: String
+    let open: Bool
+    @State private var expanded = false
+
+    var body: some View {
+        if open {
+            HStack(spacing: 8) {
+                ThinkingDots()
+                Text("Generating Command").font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+        } else {
+            DisclosureGroup("Run Command", isExpanded: $expanded) {
+                CodeBlock(lang: "python", code: code, open: false, note: nil)
+                    .padding(.top, 6)
+            }
+            .font(.subheadline.weight(.medium))
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+        }
     }
 }
