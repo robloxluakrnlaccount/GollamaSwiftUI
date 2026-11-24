@@ -2,6 +2,10 @@ name: Gollama
 options:
   deploymentTarget:
     iOS: "26.0"
+  fileTypes:
+    icon:
+      file: true
+      buildPhase: resources
 targets:
   Gollama:
     type: application
