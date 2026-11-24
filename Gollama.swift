@@ -1102,6 +1102,19 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         } catch { imagesError = error.localizedDescription }
     }
 
+    func loadNews() async {
+        guard let c = client else { return }
+        loadingNews = true
+        defer { loadingNews = false }
+        do {
+            let r = try await c.call("search_news", [query]) as? [String: Any] ?? [:]
+            newsError = r["error"] as? String
+            news = Self.newsItems(r["items"])
+            newsPage = 1
+            hasMoreNews = !news.isEmpty
+        } catch { newsError = error.localizedDescription }
+    }
+
     private static func imageItems(_ any: Any?) -> [ImageItem] {
         (any as? [[String: Any]] ?? []).map {
             ImageItem(thumb: ($0["thumb"] as? String).flatMap(URL.init), full: ($0["image"] as? String).flatMap(URL.init),
