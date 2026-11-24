@@ -110,6 +110,9 @@ struct AmbientBackground: View {
 }
 
 /// Round glass icon, exactly the same height as the search field next to it.
+/// Round glass icon used as a button label. The glass is NOT interactive on purpose: interactive glass inside a
+/// button/menu label swallows the tap (same problem as SendButton), which left the sidebar's new-chat and
+/// 3-dot buttons doing nothing.
 struct GlassIcon: View {
     let name: String
     var size: CGFloat = 44
@@ -118,7 +121,8 @@ struct GlassIcon: View {
             .font(.system(size: size * 0.38, weight: .semibold))
             .foregroundStyle(.primary)
             .frame(width: size, height: size)
-            .glassEffect(.regular.interactive(), in: .circle)
+            .glassEffect(.regular, in: .circle)
+            .contentShape(.circle)
     }
 }
 
