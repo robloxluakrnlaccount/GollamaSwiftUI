@@ -886,6 +886,7 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
     var chatTitle = "New chat"
     var chats: [ChatSummary] = []
     var pending: [Attachment] = []
+    var generatedImages: [String: (image: UIImage, fileURL: URL, prompt: String)] = [:]
     var editingId: Int?
     var editText = ""
 
@@ -1603,6 +1604,48 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         }
     }
 
+    func generateDrawImage(_ spec: String, fresh: Bool = false) async -> (image: UIImage?, fileURL: URL?, prompt: String, error: String?) {
+        let parts = spec.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        let prompt = parts.first ?? spec.trimmed
+        guard !prompt.isEmpty else { return (nil, nil, "", "Empty image prompt.") }
+        let cacheKey = "\(chatId ?? "temp")|\(spec)"
+        if !fresh, let cached = generatedImages[cacheKey] {
+            return (cached.image, cached.fileURL, cached.prompt, nil)
+        }
+        guard let c = client else { return (nil, nil, prompt, "Not connected to server.") }
+        var opts: [String: Any] = ["key": cacheKey, "fresh": fresh]
+        if chatId == nil { opts["temp"] = true }
+        for opt in parts.dropFirst() {
+            if let colon = opt.firstIndex(of: ":") {
+                let k = opt[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+                let v = opt[opt.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+                if k == "ref" && !v.isEmpty { opts["ref"] = v }
+                else if k == "strength", let d = Double(v) { opts["strength"] = d }
+                else if k == "aspect" && !v.isEmpty { opts["aspect"] = v }
+            }
+        }
+        do {
+            let r = try await c.call("comfy_generate", [prompt, opts]) as? [String: Any] ?? [:]
+            guard r["ok"] as? Bool == true else {
+                return (nil, nil, prompt, (r["error"] as? String) ?? "Image generation failed.")
+            }
+            guard let dataUrl = r["url"] as? String,
+                  let comma = dataUrl.firstIndex(of: ","),
+                  let data = Data(base64Encoded: String(dataUrl[dataUrl.index(after: comma)...]), options: .ignoreUnknownCharacters),
+                  let uiImg = UIImage(data: data) else {
+                return (nil, nil, prompt, "Could not decode generated image.")
+            }
+            let shownPrompt = (r["prompt"] as? String) ?? prompt
+            let fname = "gollama_\(abs(cacheKey.hashValue)).png"
+            let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(fname)
+            try? data.write(to: fileURL)
+            generatedImages[cacheKey] = (uiImg, fileURL, shownPrompt)
+            return (uiImg, fileURL, shownPrompt, nil)
+        } catch {
+            return (nil, nil, prompt, error.localizedDescription)
+        }
+    }
+
     func addVideo(url: URL, name: String) async {
         guard let c = client else { return }
         pending.removeAll { $0.kind == .video }
@@ -1802,7 +1845,7 @@ struct PronCard: Hashable {
 }
 
 struct ABlock: Identifiable {
-    enum Kind { case para, heading, item, quote, table, rule, code, live, math, image, pron, artifact }
+    enum Kind { case para, heading, item, quote, table, rule, code, live, math, image, pron, artifact, draw }
     let id: Int
     var kind: Kind
     var level = 0
@@ -1842,6 +1885,7 @@ enum AnswerParser {
         var maths: [String] = []
         var prons: [PronCard] = []
         var artifacts: [String] = []
+        var draws: [String] = []
         var hl = 0
         let sourceCount: Int
         init(_ n: Int) { sourceCount = n }
@@ -1870,6 +1914,8 @@ enum AnswerParser {
     private static let rePronLine = rxc("^\u{E040}(\\d+)\u{E041}$")
     private static let reArtifactTag = rxc(#"\[\[\s*artifact\s*:\s*([^\]]{1,200})\]\]"#, [.caseInsensitive])
     private static let reArtifactLine = rxc("^\u{E042}(\\d+)\u{E043}$")
+    private static let reDrawTag = rxc(#"\[\[\s*draw\s*:\s*([^\]]{2,2000})\]\]"#, [.caseInsensitive])
+    private static let reDrawLine = rxc("^\u{E044}(\\d+)\u{E045}$")
     private static let reWrapTag = rxc(#"\[\s*(\[{2,3}\s*(?:suggest(?:ion)?|ask|say|reply)\s*:[^\]]*\]{2,3})\s*\]"#, [.caseInsensitive])
     private static let reSugg = rxc(#"\[{2,3}\s*(?:suggest(?:ion)?|ask|say|reply)\s*:\s*([^\]]{2,500})\]{2,3}|\[\s*suggest(?:ion)?\s*:\s*([^\]\[]{2,500})\]"#, [.caseInsensitive])
     private static let reCodeSpan = rxc("`[^`\\n]*`")
@@ -2037,6 +2083,12 @@ enum AnswerParser {
             c.artifacts.append(name)
             return "\n\u{E042}\(c.artifacts.count - 1)\u{E043}\n"
         }
+        s = replaceMatches(reDrawTag, in: s) { m, ns in
+            let spec = (grp(m, ns, 1) ?? "").trimmed
+            guard !spec.isEmpty else { return "" }
+            c.draws.append(spec)
+            return "\n\u{E044}\(c.draws.count - 1)\u{E045}\n"
+        }
 
         // follow-ups: [[suggest: ...]] (also suggestion / ask / say / reply, 2-3 brackets, wrapped or single-bracket)
         s = sub(reWrapTag, s, "$1")
@@ -2170,6 +2222,18 @@ enum AnswerParser {
                 if idx < c.artifacts.count {
                     var d = Draft(kind: .artifact)
                     d.raw = c.artifacts[idx]
+                    out.append(d)
+                }
+                i += 1
+                continue
+            }
+            if let m = reDrawLine.firstMatch(in: t, range: NSRange(location: 0, length: tns.length)) {
+                flush()
+                stack = []
+                let idx = Int(tns.substring(with: m.range(at: 1))) ?? 0
+                if idx < c.draws.count {
+                    var d = Draft(kind: .draw)
+                    d.raw = c.draws[idx]
                     out.append(d)
                 }
                 i += 1
@@ -2772,6 +2836,8 @@ struct BlockView: View {
                 if let p = b.pron { PronunciationCard(card: p, onSuggest: onSuggest) }
             case .artifact:
                 ArtifactCard(filename: b.raw)
+            case .draw:
+                DrawImageCard(spec: b.raw)
             case .image:
                 AsyncImage(url: URL(string: b.raw)) { p in
                     if let i = p.image { i.resizable().scaledToFit() }
@@ -7399,6 +7465,101 @@ struct WorkspaceCommandBlock: View {
             .font(.subheadline.weight(.medium))
             .padding(.horizontal, 12).padding(.vertical, 8)
             .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+        }
+    }
+}
+
+struct DrawImageCard: View {
+    @Environment(AppModel.self) private var app
+    let spec: String
+    @State private var image: UIImage?
+    @State private var fileURL: URL?
+    @State private var promptText = ""
+    @State private var loading = false
+    @State private var errorText: String?
+
+    private func run(fresh: Bool = false) async {
+        loading = true
+        errorText = nil
+        let res = await app.generateDrawImage(spec, fresh: fresh)
+        loading = false
+        promptText = res.prompt
+        if let img = res.image {
+            image = img
+            fileURL = res.fileURL
+        } else {
+            errorText = res.error ?? "Could not generate image."
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let img = image {
+                Image(uiImage: img)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxHeight: 380)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                HStack(spacing: 10) {
+                    if let u = fileURL {
+                        ShareLink(item: u) {
+                            Label("Save", systemImage: "square.and.arrow.up")
+                                .font(.caption.weight(.medium))
+                                .padding(.horizontal, 10).padding(.vertical, 6)
+                                .background(Pal.blue.opacity(0.15), in: Capsule())
+                        }
+                    }
+                    Button {
+                        guard !loading else { return }
+                        Task { await run(fresh: true) }
+                    } label: {
+                        Label(loading ? "Drawing…" : "Regenerate", systemImage: "arrow.clockwise")
+                            .font(.caption.weight(.medium))
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(Color(.secondarySystemBackground), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(loading)
+                }
+            } else if let err = errorText {
+                HStack(spacing: 10) {
+                    Image(systemName: "photo.badge.exclamationmark")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.red)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Image generation failed").font(.subheadline.weight(.medium))
+                        Text(err).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                    }
+                    Spacer(minLength: 6)
+                    Button("Retry") {
+                        Task { await run(fresh: true) }
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(Pal.blue.opacity(0.15), in: Capsule())
+                    .buttonStyle(.plain)
+                }
+                .padding(12)
+                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
+            } else {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Creating image…").font(.subheadline.weight(.medium))
+                        if !promptText.isEmpty {
+                            Text(promptText).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                    }
+                    Spacer()
+                }
+                .padding(14)
+                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
+            }
+        }
+        .task(id: spec) {
+            if image == nil && errorText == nil && !loading {
+                await run(fresh: false)
+            }
         }
     }
 }
