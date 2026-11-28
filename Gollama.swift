@@ -21,6 +21,7 @@ import WebKit
 import AVKit
 import AVFoundation
 import NaturalLanguage
+import CoreLocation
 
 // MARK: - App
 
@@ -61,6 +62,71 @@ extension View {
 func hideKeyboard() {
     UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
 }
+
+final class LocationHelper: NSObject, CLLocationManagerDelegate, @unchecked Sendable {
+    static let shared = LocationHelper()
+    private let mgr = CLLocationManager()
+    private let geocoder = CLGeocoder()
+    private var lastLoc: CLLocation?
+    private var cachedPlace: (city: String, state: String, country: String, code: String)?
+    private var lastGeoAt: Date = .distantPast
+
+    override init() {
+        super.init()
+        mgr.delegate = self
+        mgr.desiredAccuracy = kCLLocationAccuracyHundredMeters
+    }
+
+    func requestPermission() {
+        DispatchQueue.main.async {
+            if self.mgr.authorizationStatus == .notDetermined {
+                self.mgr.requestWhenInUseAuthorization()
+            }
+            if self.authorized { self.mgr.requestLocation() }
+        }
+    }
+
+    private var authorized: Bool {
+        let st = mgr.authorizationStatus
+        return st == .authorizedWhenInUse || st == .authorizedAlways
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        if let l = locations.last { lastLoc = l }
+    }
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {}
+
+    func payload(approx: Bool, precise: Bool, searchFormat: Bool) async -> [String: Any] {
+        var out: [String: Any] = ["approx": approx, "precise": precise, "search_format": searchFormat]
+        guard approx || precise else { return out }
+        if authorized {
+            if lastLoc == nil {
+                await MainActor.run { self.mgr.requestLocation() }
+                try? await Task.sleep(for: .milliseconds(350))
+            }
+            if let loc = lastLoc ?? mgr.location {
+                if precise {
+                    out["lat"] = loc.coordinate.latitude
+                    out["lon"] = loc.coordinate.longitude
+                }
+                if cachedPlace == nil || Date().timeIntervalSince(lastGeoAt) > 300 {
+                    if let pm = (try? await geocoder.reverseGeocodeLocation(loc))?.first {
+                        cachedPlace = (pm.locality ?? pm.subAdministrativeArea ?? "", pm.administrativeArea ?? "", pm.country ?? "", pm.isoCountryCode ?? "")
+                        lastGeoAt = Date()
+                    }
+                }
+                if let p = cachedPlace {
+                    if !p.city.isEmpty { out["city"] = p.city }
+                    if !p.state.isEmpty { out["state"] = p.state }
+                    if !p.country.isEmpty { out["country"] = p.country }
+                    if !p.code.isEmpty { out["country_code"] = p.code }
+                }
+            }
+        }
+        return out
+    }
+}
+
 
 struct GollamaLogo: View {
     var size: CGFloat
@@ -1070,7 +1136,11 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
         overviewActive = false
         defer { searching = false }
         do {
-            let r = try await c.call("search_corrected", [q, nocorrect]) as? [String: Any] ?? [:]
+            let approx = UserDefaults.standard.object(forKey: "gollama.approxLocation") as? Bool ?? true
+            let precise = UserDefaults.standard.bool(forKey: "gollama.preciseLocation")
+            let searchFmt = UserDefaults.standard.bool(forKey: "gollama.searchWithFormat")
+            let loc = await LocationHelper.shared.payload(approx: approx, precise: precise, searchFormat: searchFmt)
+            let r = try await c.call("search_corrected", [q, nocorrect, false, loc]) as? [String: Any] ?? [:]
             results = Hit.list(r["results"])
             resultsPage = 1
             hasMoreResults = !results.isEmpty
@@ -1081,7 +1151,7 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
             overview.status = "Starting…"
             overviewActive = true
             let raw = (r["results"] as? [[String: Any]]) ?? []
-            try await c.call("generate", [query, raw])
+            try await c.call("generate", [query, raw, false, loc])
             startPolling()
         } catch {
             searchError = error.localizedDescription
@@ -1428,9 +1498,13 @@ final class SpeechController: NSObject, AVSpeechSynthesizerDelegate {
             history.append(["role": "assistant", "content": t.answer])
         }
         ensureChat()
+        let approx = UserDefaults.standard.object(forKey: "gollama.approxLocation") as? Bool ?? true
+        let precise = UserDefaults.standard.bool(forKey: "gollama.preciseLocation")
+        let searchFmt = UserDefaults.standard.bool(forKey: "gollama.searchWithFormat")
+        let loc = await LocationHelper.shared.payload(approx: approx, precise: precise, searchFormat: searchFmt)
         let attach: [String: Any] = [
             "chat_id": chatId ?? "", "images": turn.imagesB64, "image_names": turn.imageNames, "files": turn.fileDicts,
-            "videos": turn.videos.map { $0.id }, "temp": false, "project": NSNull()
+            "videos": turn.videos.map { $0.id }, "temp": false, "project": NSNull(), "location": loc
         ]
         activeTurns.insert(turn.id)
         do {
@@ -4704,6 +4778,9 @@ struct SettingsView: View {
     @Bindable private var prefs = Prefs.shared
     @State private var totalBytes: Int64 = 0
     @AppStorage("gollama.freshSuggestions") private var freshSuggestions = true
+    @AppStorage("gollama.approxLocation") private var approxLocation = true
+    @AppStorage("gollama.preciseLocation") private var preciseLocation = false
+    @AppStorage("gollama.searchWithFormat") private var searchWithFormat = false
 
     private var languageName: String {
         prefs.language == .system ? tr("System default") : prefs.language.nativeName
@@ -4767,6 +4844,25 @@ struct SettingsView: View {
                     }
                 } footer: {
                     Text(tr("Makes new start-page suggestions each time the app opens. Turn it off to keep the same ones. Needs personal suggestions turned on in the server settings."))
+                }
+
+                Section {
+                    Toggle(isOn: $approxLocation) {
+                        Label(tr("Approximate location"), systemImage: "location")
+                    }
+                    Toggle(isOn: $preciseLocation) {
+                        Label(tr("Precise location"), systemImage: "location.fill")
+                    }
+                    .onChange(of: preciseLocation) { _, on in
+                        if on { LocationHelper.shared.requestPermission() }
+                    }
+                    Toggle(isOn: $searchWithFormat) {
+                        Label(tr("Search with format"), systemImage: "magnifyingglass")
+                    }
+                } header: {
+                    Text(tr("Location"))
+                } footer: {
+                    Text(tr("Approximate location shares an estimated city, state, and country with AI Mode. Precise location shares GPS coordinates when allowed. Search with format (off by default) appends abbreviated location like (Los Angeles, CA, USA) to Search."))
                 }
             }
             .navigationTitle(tr("Settings"))
